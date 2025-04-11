@@ -1,0 +1,25 @@
+#Advised to install these in a virtual environment individual to your project due to issues with DEAP installation
+
+setuptools
+
+# Tree-Sitter for multi-language AST parsing
+tree-sitter==0.20.1
+
+# DEAP: Genetic Algorithm library
+deap
+
+# OpenAI SDK for LLM integration
+openai==0.28.0
+
+# FastAPI for the web interface (if needed)
+fastapi
+uvicorn # ASGI server for FastAPI
+
+# Matplotlib for visualization of mutation steps
+matplotlib
+
+# NetworkX for additional graph-based visualizations or AST analysis
+networkx
+
+# Optional: python-dotenv for managing environment variables (like API keys)
+python-dotenv
