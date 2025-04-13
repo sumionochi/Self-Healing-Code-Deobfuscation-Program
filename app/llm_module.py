@@ -8,7 +8,6 @@ import re # Ensure re is imported
 from dotenv import load_dotenv
 from typing import List # Import List type hint
 
-# (Load env, logging setup, API key check remains the same)
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -17,7 +16,6 @@ if openai.api_key is None:
     logger.error("OPENAI_API_KEY not set.")
     raise EnvironmentError("Missing OPENAI_API_KEY")
 
-# (get_variable_mapping remains the same - already requests functions/classes)
 def get_variable_mapping(code: str, lang: str) -> dict:
     """Gets initial mapping for variables, functions, classes."""
     prompt = (
@@ -171,8 +169,6 @@ def suggest_better_names(original_name: str, current_name: str, code_context: st
         logger.error(f"Error suggesting better names for '{current_name}': {e}")
         return [] # Return empty list on error
 
-
-# (rename_variables_multilang can remain if needed for other modes)
 def rename_variables_multilang(code: str, lang: str) -> str:
     """Uses the OpenAI API to directly transform code by renaming obfuscated variables."""
     # ... (existing implementation) ...
@@ -195,37 +191,83 @@ def rename_variables_multilang(code: str, lang: str) -> str:
         logger.error("Error during code transformation: %s", e)
         raise e
     
-if __name__ == "__main__":
-    # For testing purposes with a sample code snippet.
-    sample_code = "def x(a, b): return a+b"
-    lang = "python"
-    try:
-        mapping = get_identifier_mapping(sample_code, lang)
-        logger.info("Mapping: %s", mapping)
-    except Exception as e:
-        logger.error("Mapping failed: %s", e)
-    
-    try:
-        transformed = rename_variables_multilang(sample_code, lang)
-        logger.info("Transformed code: %s", transformed)
-    except Exception as e:
-        logger.error("Transformation failed: %s", e)
+def deobfuscate_strings_llm(code: str, lang: str, **kwargs) -> str | None:
+    """
+    Uses an LLM to identify and deobfuscate common string obfuscations in code.
 
-if __name__ == "__main__":
-    # For testing purposes with a sample code snippet.
-    sample_code = "def x(a, b): return a+b"
-    lang = "python"
+    Args:
+        code: The source code string.
+        lang: The programming language identifier.
+        **kwargs: Additional arguments for the LLM call (e.g., model, temperature).
+
+    Returns:
+        The code string potentially modified with deobfuscated strings,
+        or None if an error occurs during the LLM call.
+        Returns the original code string if the LLM indicates no changes were made.
+    """
+    logger.info(f"Requesting LLM for string deobfuscation (lang: {lang})...")
+
+    common_patterns_desc = """
+    - Character Arrays/Lists initialized with integer char codes (e.g., `char s[] = {104, 101, ...};`, `let s = [104, 101, ...]`, `s = [104, 101, ...]`).
+    - Hex Arrays/Strings (e.g., `0x68, 0x65, ...`).
+    - Base64 Encoded Strings, often used with decode functions (e.g., `base64.b64decode('aGVsbG8=')`).
+    - Concatenation of multiple small strings or single characters.
+    - Simple XOR/Shift encoded strings (look for decoding loops/functions).
+    - Calls to custom decoding functions (e.g., `decode_string`, `get_hidden_text`).
+    - Excessive octal or hex escapes within string literals.
+    """
+
+    prompt = f"""
+        You are an expert code analysis assistant specializing in deobfuscation for the '{lang}' language.
+        Your task is to identify and reverse common string obfuscation techniques within the provided code snippet.
+
+        Analyze the following '{lang}' code:
+        {code}
+
+        Identify instances where string literals appear to be obfuscated using techniques such as (but not limited to):
+        {common_patterns_desc}
+
+        Replace these obfuscated representations *in place* with their original, plain string literal equivalents, formatted correctly for '{lang}'.
+
+        **Instructions:**
+        1.  Carefully analyze and decode/reassemble obfuscated strings.
+        2.  Modify the code to replace the obfuscated form with the plain string literal (e.g., replace `char s[] = {{104, 101, ...}};` with `char* s = "hello";` or `print(b64decode('aGVsbG8='))` with `print("hello")`, adjusting for '{lang}' syntax).
+        3.  **Only modify the string representations.** Do NOT change variable names, logic, control flow, comments, etc., unless removing a decoding mechanism made redundant by the inline string.
+        4.  If an obfuscation method is complex or unclear, **leave it unchanged**. Prioritize correctness.
+        5.  Return the **entire modified code block** as a single response, without explanations or markdown formatting.
+
+        Modified Code Only:
+        """
+
     try:
-        mapping = get_identifier_mapping(sample_code, lang)
-        logger.info("Mapping: %s", mapping)
+        llm_model = kwargs.get("llm_model", "gpt-4o-mini")
+        temperature = kwargs.get("temperature", 0.2)
+
+        response = openai.ChatCompletion.create(
+            model=llm_model,
+            messages=[
+                {"role": "system", "content": f"You are a code deobfuscation assistant for {lang} focused on strings. You only output modified code."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=temperature,
+            max_tokens=max(2048, len(code.split()) + 512),
+            n=1,
+            stop=None
+        )
+
+        transformed_code = response.choices[0].message.content.strip()
+        # Clean LLM Output
+        transformed_code = re.sub(r'^```[a-zA-Z]*\s*', '', transformed_code)
+        transformed_code = re.sub(r'\s*```$', '', transformed_code).strip()
+
+        if not transformed_code:
+            logger.warning("LLM returned empty response for string deobfuscation.")
+            # Return original code if LLM gives up or fails in a way that results in empty output
+            return code
+        else:
+            # Return potentially modified code (could be same as original if no changes made)
+            return transformed_code
+
     except Exception as e:
-        logger.error("Mapping failed: %s", e)
-    
-    # Example usage of apply_mapping_to_code
-    sample_mapping = {"x": "addFunction", "a": "valA", "b": "valB"}
-    try:
-        transformed = apply_mapping_to_code(sample_code, sample_mapping, lang)
-        transformed = transformed.replace("```c", "").replace("```", "").strip()
-        logger.info("Transformed code: %s", transformed)
-    except Exception as e:
-        logger.error("Transformation failed: %s", e)
+        logger.error(f"LLM call failed during string deobfuscation: {e}", exc_info=True)
+        return None # Indicate critical failure in LLM communication/processing

@@ -1,11 +1,16 @@
 {
     "cSpell.words": [
+        "controlflow",
+        "deadcode",
         "deap",
         "dotenv",
         "funcs",
+        "keepends",
+        "lineterm",
         "multilang",
         "sexp",
         "tion",
+        "tofile",
         "venv"
     ]
 }

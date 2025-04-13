@@ -1045,3 +1045,40 @@ if __name__ == "__main__":
         logger.info("Transformed code: %s", transformed)
     except Exception as e:
         logger.error("Transformation failed: %s", e)
+
+
+
+        if __name__ == "__main__":
+    # For testing purposes with a sample code snippet.
+    sample_code = "def x(a, b): return a+b"
+    lang = "python"
+    try:
+        mapping = get_identifier_mapping(sample_code, lang)
+        logger.info("Mapping: %s", mapping)
+    except Exception as e:
+        logger.error("Mapping failed: %s", e)
+    
+    try:
+        transformed = rename_variables_multilang(sample_code, lang)
+        logger.info("Transformed code: %s", transformed)
+    except Exception as e:
+        logger.error("Transformation failed: %s", e)
+
+if __name__ == "__main__":
+    # For testing purposes with a sample code snippet.
+    sample_code = "def x(a, b): return a+b"
+    lang = "python"
+    try:
+        mapping = get_identifier_mapping(sample_code, lang)
+        logger.info("Mapping: %s", mapping)
+    except Exception as e:
+        logger.error("Mapping failed: %s", e)
+    
+    # Example usage of apply_mapping_to_code
+    sample_mapping = {"x": "addFunction", "a": "valA", "b": "valB"}
+    try:
+        transformed = apply_mapping_to_code(sample_code, sample_mapping, lang)
+        transformed = transformed.replace("```c", "").replace("```", "").strip()
+        logger.info("Transformed code: %s", transformed)
+    except Exception as e:
+        logger.error("Transformation failed: %s", e)
