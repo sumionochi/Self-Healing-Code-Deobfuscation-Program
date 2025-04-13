@@ -346,3 +346,76 @@ def apply_mapping_to_code(base_code: str, mapping: dict, lang: str) -> str:
     except Exception as e:
         logger.error("Error applying mapping to code: {e}")
         raise e    
+    
+def simplify_expressions_llm(code: str, lang: str, **kwargs) -> str | None:
+    """
+    Uses an LLM to simplify constant expressions and boolean logic in code.
+
+    Args:
+        code: The source code string.
+        lang: The programming language identifier.
+        **kwargs: Additional arguments for the LLM call (e.g., model, temperature).
+
+    Returns:
+        The code string potentially modified with simplified expressions,
+        or None if a critical error occurs during the LLM call.
+        Returns the original code string if the LLM indicates no changes were made.
+    """
+    logger.info(f"Requesting LLM for expression simplification (lang: {lang})...")
+
+    simplification_types = """
+    - Constant Folding: Evaluate constant arithmetic expressions (e.g., `2 + 3 * 4` -> `14`).
+    - Arithmetic Identities: Simplify operations like `x + 0`, `x - 0`, `x * 1`, `x / 1`, `x * 0`, `0 / x`.
+    - Boolean Logic: Simplify expressions using standard rules (De Morgan's laws, double negation, identity laws, etc.). E.g., `!(!a || !b)` -> `a && b`.
+    - Trivial Conditions: Simplify comparisons involving constants like `x == true` (if language allows) -> `x`, `y == false` -> `!y`, etc.
+    - Redundant Operations: Remove redundant casts or operations where possible.
+    """
+
+    prompt = f"""
+        You are an expert code optimization assistant for the '{lang}' language, focusing ONLY on simplifying expressions (constants and boolean logic).
+        Analyze the following '{lang}' code:
+        {code}
+
+
+        Apply the following types of expression simplifications where applicable and **semantically equivalent**:
+        {simplification_types}
+
+        **Instructions:**
+        1.  Apply *only* the requested expression simplifications.
+        2.  **Crucially: Ensure the logical behavior of the code remains IDENTICAL.** Do not simplify if it changes program logic (e.g., be careful with floating-point precision issues or potential side effects in expressions if applicable to '{lang}').
+        3.  Do NOT perform other refactorings (like renaming, string changes, control flow changes, dead code removal).
+        4.  If no simplifications can be safely applied, return the original code block unchanged.
+        5.  Return the **entire modified code block** as a single response. Do not add explanations or markdown formatting. Just the raw code.
+
+        Modified Code Only:
+        """
+
+    try:
+        llm_model = kwargs.get("llm_model", "gpt-4o-mini")
+        temperature = kwargs.get("temperature", 0.1) # Low temp for precise changes
+
+        response = openai.ChatCompletion.create(
+            model=llm_model,
+            messages=[
+                {"role": "system", "content": f"You are a precise code optimization assistant for {lang} focused only on expression simplification. You only output code."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=temperature,
+            max_tokens=max(2048, len(code.split()) + 512),
+            n=1,
+            stop=None
+        )
+
+        simplified_code = response.choices[0].message.content.strip()
+        # Clean LLM Output
+        simplified_code = re.sub(r'^```[a-zA-Z]*\s*|\s*```$', '', simplified_code).strip()
+
+        if not simplified_code:
+            logger.warning("LLM returned empty response for expression simplification.")
+            return code # Return original
+        else:
+            return simplified_code # Return potentially modified code
+
+    except Exception as e:
+        logger.error(f"LLM call failed during expression simplification: {e}", exc_info=True)
+        return None # Indicate critical failure
