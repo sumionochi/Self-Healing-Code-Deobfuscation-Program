@@ -4,7 +4,7 @@ import os
 import openai
 import logging
 import json
-import re # Ensure re is imported
+import re
 from dotenv import load_dotenv
 from typing import List # Import List type hint
 
@@ -58,116 +58,6 @@ def get_variable_mapping(code: str, lang: str) -> dict:
     except Exception as e:
         logger.error(f"Error obtaining identifier mapping: {e}")
         raise e
-
-# (apply_mapping_to_code remains the same)
-def apply_mapping_to_code(base_code: str, mapping: dict, lang: str) -> str:
-    """Uses the OpenAI API to apply the given identifier mapping to the base_code."""
-    mapping_json = json.dumps(mapping, indent=2)
-    prompt = (
-        f"You are an expert {lang} developer. Apply the following identifier mapping exactly to the code below. "
-        "Do not alter any other identifiers, comments, or structure. Only change identifiers specified in the mapping. "
-        "Return only the transformed code, ensuring it remains syntactically correct.\n\n"
-        "Identifier Mapping:\n"
-        f"{mapping_json}\n\n"
-        "Original Code:\n"
-        f"```\n{base_code}\n```\n\n"
-        "Transformed Code Only:" # Be explicit
-    )
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini", # Or preferred model
-            messages=[
-                {"role": "system", "content": f"You are a precise {lang} code transformation assistant."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.1, # Very low temp for precise application
-            max_tokens=1024, # Allow sufficient length
-            n=1
-        )
-        transformed_code = response.choices[0].message.content.strip()
-        # Clean potential markdown fences if they appear
-        transformed_code = re.sub(r'^```[a-zA-Z]*\s*', '', transformed_code)
-        transformed_code = re.sub(r'\s*```$', '', transformed_code).strip()
-        logger.info("Applied mapping to code successfully for %s.", lang)
-        # logger.debug(transformed_code) # Log full code only in debug
-        return transformed_code
-    except Exception as e:
-        logger.error("Error applying mapping to code: {e}")
-        raise e
-
-
-def suggest_better_names(original_name: str, current_name: str, code_context: str, lang: str, count: int = 3) -> List[str]:
-    """
-    Uses the OpenAI API to suggest MULTIPLE improved names for a given identifier,
-    considering its context. Asks for diverse and potentially more descriptive options.
-    Returns a list of strings.
-    """
-    prompt = (
-        f"You are an expert {lang} developer focused on improving code readability and maintainability. "
-        f"Analyze the identifier `{current_name}` (originally `{original_name}`) within the following {lang} code snippet:\n\n"
-        f"Code Context:\n"
-        f"```\n{code_context}\n```\n\n"
-        f"Suggest exactly **{count}** potential alternative names for `{current_name}`. "
-        "Prioritize names that are:\n"
-        f"1. **More Descriptive:** Clearly convey the purpose based on the context.\n"
-        f"2. **Conventional:** Follow standard {lang} naming conventions (e.g., snake_case/PascalCase for Python, camelCase/PascalCase for Java/C#, etc.).\n"
-        f"3. **Concise but Clear:** Avoid unnecessary length but don't sacrifice clarity.\n"
-        f"4. **Diverse:** Offer different stylistic or semantic alternatives if possible.\n\n"
-        f"Even if `{current_name}` seems acceptable, try to offer improvements or valid alternatives.\n\n"
-        "Return the suggestions as a JSON list of strings. Example: `[\"suggestion_one\", \"suggestion_two\", \"suggestion_three\"]`\n\n"
-        "JSON List of Suggestions:"
-    )
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini", # Or a more powerful model if needed
-            messages=[
-                {"role": "system", "content": f"You are a helpful assistant providing multiple improved {lang} identifier name suggestions as a JSON list."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.5, # Higher temp for more diverse suggestions
-            max_tokens=150, # Enough for a few names
-            n=1,
-            response_format={"type": "json_object"} # Request JSON
-        )
-        response_content = response.choices[0].message.content.strip()
-        logger.debug(f"Raw name suggestions response for '{current_name}': {response_content}")
-
-        # Expecting response like {"suggestions": ["name1", "name2"]} or just ["name1", "name2"]
-        suggestions = []
-        try:
-            data = json.loads(response_content)
-            if isinstance(data, list):
-                 suggestions = data
-            elif isinstance(data, dict):
-                 # Look for a key that might contain the list (e.g., 'suggestions', 'names', 'alternatives')
-                 possible_keys = ['suggestions', 'names', 'alternatives', 'results']
-                 for key in possible_keys:
-                     if key in data and isinstance(data[key], list):
-                         suggestions = data[key]
-                         break
-                 if not suggestions: # If dict format but no expected key found
-                      logger.warning(f"LLM returned JSON dict but no suggestion list found: {response_content}")
-
-            # Validate suggestions are strings
-            suggestions = [str(s) for s in suggestions if isinstance(s, str) and s]
-
-        except json.JSONDecodeError:
-            logger.error(f"Failed to decode JSON suggestions: {response_content}")
-            # Attempt to extract names if it's just a simple list-like string without JSON structure
-            # (e.g. "suggestion_one, suggestion_two") - less reliable
-            suggestions = [name.strip() for name in response_content.split(',') if name.strip()]
-
-
-        if not suggestions:
-             logger.warning(f"LLM did not provide valid suggestions for '{current_name}'.")
-             return [] # Return empty list
-
-        logger.info(f"LLM suggested names for '{current_name}': {suggestions}")
-        return suggestions[:count] # Return up to the requested count
-
-    except Exception as e:
-        logger.error(f"Error suggesting better names for '{current_name}': {e}")
-        return [] # Return empty list on error
 
 def rename_variables_multilang(code: str, lang: str) -> str:
     """Uses the OpenAI API to directly transform code by renaming obfuscated variables."""
@@ -271,3 +161,188 @@ def deobfuscate_strings_llm(code: str, lang: str, **kwargs) -> str | None:
     except Exception as e:
         logger.error(f"LLM call failed during string deobfuscation: {e}", exc_info=True)
         return None # Indicate critical failure in LLM communication/processing
+
+def simplify_control_flow_llm(code: str, lang: str, active_simplification_flags: List[str], **kwargs) -> str | None:
+    """
+    Uses an LLM to apply specific, requested control flow simplifications to code.
+
+    Args:
+        code: The source code string.
+        lang: The programming language identifier.
+        active_simplification_flags: A list of strings specifying which simplifications
+                                      the LLM should attempt (e.g., from SIMPLIFICATION_FLAGS).
+        **kwargs: Additional arguments for the LLM call (e.g., model, temperature).
+
+    Returns:
+        The code string potentially modified with simplified control flow,
+        or None if a critical error occurs during the LLM call.
+        Returns the original code string if the LLM indicates no changes were made or possible.
+    """
+    if not active_simplification_flags:
+        logger.debug("No active control flow simplification flags provided. Skipping LLM call.")
+        return code # Return original code if no flags are active
+
+    logger.info(f"Requesting LLM for control flow simplification (lang: {lang}, flags: {active_simplification_flags})...")
+
+    # Construct the prompt dynamically based on active flags
+    flags_string = chr(10).join(f"- {flag}" for flag in active_simplification_flags) # Use newline join
+
+    prompt = f"""
+        You are an expert code refactoring assistant for the '{lang}' language, focused ONLY on specific control flow simplifications.
+        Analyze the following '{lang}' code:
+        {code}
+
+
+        Apply **ONLY** the following types of control flow simplifications where applicable and **semantically equivalent**:
+        {flags_string}
+
+        **Important Instructions:**
+        1.  Apply *only* the requested simplifications listed above. Do NOT apply other simplifications.
+        2.  **Crucially: Ensure the logical behavior of the code remains IDENTICAL.** Do not make changes if unsure about equivalence. This is the highest priority.
+        3.  Do NOT perform other refactorings (like renaming, constant folding, string changes, etc.).
+        4.  If none of the requested simplifications can be safely applied, return the original code block unchanged.
+        5.  Return the **entire modified code block** as a single response. Do not add explanations or markdown formatting. Just the raw code.
+
+        Modified Code Only:
+        """
+
+    try:
+        llm_model = kwargs.get("llm_model", "gpt-4o-mini") # Use a capable model
+        temperature = kwargs.get("temperature", 0.1) # Very low temp for precise, safe changes
+
+        response = openai.ChatCompletion.create(
+            model=llm_model,
+            messages=[
+                {"role": "system", "content": f"You are a precise code refactoring assistant for {lang} focused only on specified control flow simplifications. You only output code."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=temperature,
+            max_tokens=max(2048, len(code.split()) + 512), # Ensure enough tokens
+            n=1,
+            stop=None
+        )
+
+        simplified_code = response.choices[0].message.content.strip()
+        # Clean LLM Output
+        simplified_code = re.sub(r'^```[a-zA-Z]*\s*', '', simplified_code)
+        simplified_code = re.sub(r'\s*```$', '', simplified_code).strip()
+
+        if not simplified_code:
+            logger.warning("LLM returned empty response for control flow simplification.")
+            return code # Return original code if LLM gives up
+        else:
+             # Return potentially modified code (could be same as original if no changes applied)
+             # Let the calling function compare if needed
+             return simplified_code
+
+    except Exception as e:
+        logger.error(f"LLM call failed during control flow simplification: {e}", exc_info=True)
+        return None 
+    
+def suggest_better_names(original_name: str, current_name: str, code_context: str, lang: str, count: int = 3) -> List[str]:
+    """
+    Uses the OpenAI API to suggest MULTIPLE improved names for a given identifier,
+    considering its context. Asks for diverse and potentially more descriptive options.
+    Returns a list of strings.
+    """
+    prompt = (
+        f"You are an expert {lang} developer focused on improving code readability and maintainability. "
+        f"Analyze the identifier `{current_name}` (originally `{original_name}`) within the following {lang} code snippet:\n\n"
+        f"Code Context:\n"
+        f"```\n{code_context}\n```\n\n"
+        f"Suggest exactly **{count}** potential alternative names for `{current_name}`. "
+        "Prioritize names that are:\n"
+        f"1. **More Descriptive:** Clearly convey the purpose based on the context.\n"
+        f"2. **Conventional:** Follow standard {lang} naming conventions (e.g., snake_case/PascalCase for Python, camelCase/PascalCase for Java/C#, etc.).\n"
+        f"3. **Concise but Clear:** Avoid unnecessary length but don't sacrifice clarity.\n"
+        f"4. **Diverse:** Offer different stylistic or semantic alternatives if possible.\n\n"
+        f"Even if `{current_name}` seems acceptable, try to offer improvements or valid alternatives.\n\n"
+        "Return the suggestions as a JSON list of strings. Example: `[\"suggestion_one\", \"suggestion_two\", \"suggestion_three\"]`\n\n"
+        "JSON List of Suggestions:"
+    )
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini", # Or a more powerful model if needed
+            messages=[
+                {"role": "system", "content": f"You are a helpful assistant providing multiple improved {lang} identifier name suggestions as a JSON list."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.5, # Higher temp for more diverse suggestions
+            max_tokens=150, # Enough for a few names
+            n=1,
+            response_format={"type": "json_object"} # Request JSON
+        )
+        response_content = response.choices[0].message.content.strip()
+        logger.debug(f"Raw name suggestions response for '{current_name}': {response_content}")
+
+        # Expecting response like {"suggestions": ["name1", "name2"]} or just ["name1", "name2"]
+        suggestions = []
+        try:
+            data = json.loads(response_content)
+            if isinstance(data, list):
+                 suggestions = data
+            elif isinstance(data, dict):
+                 # Look for a key that might contain the list (e.g., 'suggestions', 'names', 'alternatives')
+                 possible_keys = ['suggestions', 'names', 'alternatives', 'results']
+                 for key in possible_keys:
+                     if key in data and isinstance(data[key], list):
+                         suggestions = data[key]
+                         break
+                 if not suggestions: # If dict format but no expected key found
+                      logger.warning(f"LLM returned JSON dict but no suggestion list found: {response_content}")
+
+            # Validate suggestions are strings
+            suggestions = [str(s) for s in suggestions if isinstance(s, str) and s]
+
+        except json.JSONDecodeError:
+            logger.error(f"Failed to decode JSON suggestions: {response_content}")
+            # Attempt to extract names if it's just a simple list-like string without JSON structure
+            # (e.g. "suggestion_one, suggestion_two") - less reliable
+            suggestions = [name.strip() for name in response_content.split(',') if name.strip()]
+
+
+        if not suggestions:
+             logger.warning(f"LLM did not provide valid suggestions for '{current_name}'.")
+             return [] # Return empty list
+
+        logger.info(f"LLM suggested names for '{current_name}': {suggestions}")
+        return suggestions[:count] # Return up to the requested count
+
+    except Exception as e:
+        logger.error(f"Error suggesting better names for '{current_name}': {e}")
+        return [] # Return empty list on error    
+    
+def apply_mapping_to_code(base_code: str, mapping: dict, lang: str) -> str:
+    """Uses the OpenAI API to apply the given identifier mapping to the base_code."""
+    mapping_json = json.dumps(mapping, indent=2)
+    prompt = (
+        f"You are an expert {lang} developer. Apply the following identifier mapping exactly to the code below. "
+        "Do not alter any other identifiers, comments, or structure. Only change identifiers specified in the mapping. "
+        "Return only the transformed code, ensuring it remains syntactically correct.\n\n"
+        "Identifier Mapping:\n"
+        f"{mapping_json}\n\n"
+        "Original Code:\n"
+        f"```\n{base_code}\n```\n\n"
+        "Transformed Code Only:" # Be explicit
+    )
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini", # Or preferred model
+            messages=[
+                {"role": "system", "content": f"You are a precise {lang} code transformation assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1, # Very low temp for precise application
+            max_tokens=1024, # Allow sufficient length
+            n=1
+        )
+        transformed_code = response.choices[0].message.content.strip()
+        # Clean potential markdown fences if they appear
+        transformed_code = re.sub(r'^```[a-zA-Z]*\s*', '', transformed_code)
+        transformed_code = re.sub(r'\s*```$', '', transformed_code).strip()
+        logger.info("Applied mapping to code successfully for %s.", lang)
+        # logger.debug(transformed_code) # Log full code only in debug
+        return transformed_code
+    except Exception as e:
+        logger.error("Error applying mapping to code: {e}")
+        raise e    
