@@ -419,3 +419,79 @@ def simplify_expressions_llm(code: str, lang: str, **kwargs) -> str | None:
     except Exception as e:
         logger.error(f"LLM call failed during expression simplification: {e}", exc_info=True)
         return None # Indicate critical failure
+    
+def remove_dead_code_llm(code: str, lang: str, **kwargs) -> str | None:
+    """
+    Uses an LLM to cautiously identify and remove dead/unreachable code.
+
+    Args:
+        code: The source code string.
+        lang: The programming language identifier.
+        **kwargs: Additional arguments for the LLM call (e.g., model, temperature).
+
+    Returns:
+        The code string potentially modified with dead code removed,
+        or None if a critical error occurs during the LLM call.
+        Returns the original code string if the LLM indicates no changes were made or possible.
+    """
+    logger.info(f"Requesting LLM for dead code removal (lang: {lang})...")
+
+    # Emphasize safety and specific types of dead code
+    dead_code_types = """
+    - Unused Local Variables: Variables declared within a function/scope but never read or used.
+    - Unused Private/Static Functions: Functions not exported and never called from within the analyzed code block (be cautious of external calls, reflection, etc.).
+    - Unreachable Code: Code immediately following unconditional return, break, continue, or throw statements within the same block.
+    - Redundant/No-Operation Code: Statements that have no effect.
+    """
+
+    prompt = f"""
+        You are an expert code analysis assistant for the '{lang}' language, focused **ONLY** on **safely removing obviously dead or unreachable code**.
+        Analyze the following '{lang}' code:
+        {code}
+
+
+        Identify and remove code constructs that are **provably** dead or unreachable based *only* on the provided code context. Focus on:
+        {dead_code_types}
+
+        **EXTREMELY IMPORTANT SAFETY INSTRUCTIONS:**
+        1.  **BE CONSERVATIVE:** If there is **ANY** doubt about whether code is truly dead (e.g., a function might be called externally, a variable used via reflection or dynamic means), **DO NOT REMOVE IT**.
+        2.  **PRESERVE BEHAVIOR:** The primary goal is to remove useless code **WITHOUT** changing the program's observable behavior or logic in any way.
+        3.  **NO OTHER CHANGES:** Do NOT perform any other refactoring (renaming, simplification, formatting, etc.). Only remove code identified as dead/unreachable according to the strict rules above.
+        4.  **FUNCTIONS/METHODS:** Be extra cautious removing functions or methods. Only remove clearly unused **private** or **static** functions/methods that are not part of any public API or interface definition. Leave public/exported functions untouched unless you are absolutely certain they are unused *and* not part of an external contract.
+        5.  If no code can be safely removed, return the original code block unchanged.
+        6.  Return the **entire modified code block** as a single response. Do not add explanations or markdown formatting. Just the raw code.
+
+        Modified Code Only:
+        """
+
+    try:
+        # Use a model known for strong reasoning, maybe slightly higher temp might explore *what* could be dead, but safety demands caution. Let's keep temp low.
+        llm_model = kwargs.get("llm_model", "gpt-4o-mini") # Consider GPT-4 for better reasoning if needed
+        temperature = kwargs.get("temperature", 0.1) # Very low temp for safety
+
+        response = openai.ChatCompletion.create(
+            model=llm_model,
+            messages=[
+                {"role": "system", "content": f"You are a highly cautious code analysis assistant for {lang} focused *only* on safely removing dead code. You only output code."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=temperature,
+            max_tokens=max(2048, len(code.split()) + 256), # Allow some shrinkage, but still need buffer
+            n=1,
+            stop=None
+        )
+
+        cleaned_code = response.choices[0].message.content.strip()
+        # Clean LLM Output
+        cleaned_code = re.sub(r'^```[a-zA-Z]*\s*|\s*```$', '', cleaned_code).strip()
+
+        if not cleaned_code:
+            logger.warning("LLM returned empty response for dead code removal.")
+            return code # Return original code if LLM gives up
+        else:
+            return cleaned_code # Return potentially modified code
+
+    except Exception as e:
+        logger.error(f"LLM call failed during dead code removal: {e}", exc_info=True)
+        return None # Indicate critical failure
+    
