@@ -1,3 +1,3 @@
-int sum_of_two_integers (int first_operand, int second_operand){
-    return first_operand+second_operand;
+int integer_addition (int first_addend, int addend_two){
+    return first_addend + addend_two;
 }

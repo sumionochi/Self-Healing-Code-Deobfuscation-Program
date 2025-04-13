@@ -2,127 +2,91 @@
 
 import random
 import re
-import logging # Added for better logging
+import logging
 from deap import base, creator, tools
-import json # Added for potential LLM interaction
+import json
+import math # For potential calculations
 
 # Import mapping-based functions from the LLM module.
-# Assumes llm_module now potentially has a function for suggesting improved names
-from .llm_module import get_variable_mapping, apply_mapping_to_code, suggest_better_name # <-- Added suggest_better_name
+# Assume llm_module.suggest_better_name now returns a LIST of suggestions
+from .llm_module import get_variable_mapping, apply_mapping_to_code, suggest_better_names # Renamed for clarity
 # For AST validation and parsing.
 from .parser_module import parse_code
 
-logger = logging.getLogger(__name__) # Added logger
+logger = logging.getLogger(__name__)
 
 #####################################
 # 1. Individual and Population Setup
 #####################################
-# (No changes needed here)
+# Add 'history' to track changes? Could be complex. Stick with map for now.
 creator.create("FitnessMax", base.Fitness, weights=(1.0,))
 creator.create("Individual", dict, fitness=creator.FitnessMax)
 
+# (init_individual and init_population remain the same)
 def init_individual(base_code: str, var_map: dict):
-    """
-    Initialize an individual containing:
-    - 'base_code': the original code (never changes)
-    - 'var_map': a mapping dict (original_identifier -> new_identifier)
-    """
     ind = creator.Individual()
     ind["base_code"] = base_code
     ind["var_map"] = var_map
     return ind
 
 def init_population(n: int, base_code: str, initial_mapping: dict):
-    """
-    Creates a population of individuals. For simplicity, every individual starts
-    with the same base code and a copy of the initial mapping.
-    """
-    # Add slight variations to initial mappings to encourage diversity from the start
-    population = []
-    for i in range(n):
-        new_mapping = dict(initial_mapping)
-        # Optional: Introduce minor variations or use slightly different LLM prompts for initial diversity
-        # For now, just creating copies
-        population.append(init_individual(base_code, new_mapping))
-    return population
+    return [init_individual(base_code, dict(initial_mapping)) for _ in range(n)]
 
 
 #####################################
 # 2. Rendering and AST Validation
 #####################################
-# (No changes needed here, relies on llm_module and parser_module)
+# (render_code and normalize_sexp remain the same)
 def render_code(individual, lang: str, languages: dict):
-    """
-    Applies the individual's identifier mapping to the base code using the LLM,
-    then parses the result with Tree-sitter to ensure syntactic validity.
-    Returns the rendered code and its AST tree.
-    """
     base_code = individual["base_code"]
     var_map = individual["var_map"]
     try:
-        # Ensure mapping values are strings
         safe_map = {k: str(v) for k, v in var_map.items()}
         rendered_code = apply_mapping_to_code(base_code, safe_map, lang)
         tree = parse_code(rendered_code, lang, languages)
-        # Handle potential None return from parse_code
         if tree is None:
              logger.warning(f"Code parsing failed for language {lang} after applying mapping. Code:\n{rendered_code[:500]}...")
              raise ValueError("Failed to parse rendered code.")
         return rendered_code, tree
     except Exception as e:
         logger.error(f"Error during code rendering or parsing: {e}")
-        # Return original code and None tree to indicate failure? Or raise?
-        # Raising allows the evaluation to catch it and assign low fitness.
-        raise e # Re-raise to be caught by evaluate_individual
+        raise e
 
 def normalize_sexp(sexp: str) -> str:
-    """
-    Normalizes an S-expression by stripping numeric location information and extra whitespace.
-    """
-    # (No changes needed here)
     normalized = re.sub(r":[0-9]+", "", sexp)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
 
 #####################################
-# 3. Fitness Evaluation
+# 3. Fitness Evaluation (Refined Weights & Logic)
 #####################################
-def evaluate_individual(individual, lang: str, languages: dict, initial_map: dict): # Added initial_map
+def evaluate_individual(individual, lang: str, languages: dict, initial_map: dict):
     """
-    Evaluates an individual's fitness based on language-agnostic criteria:
-    1. Semantic appropriateness of identifier names (vars & functions)
-    2. Consistency in naming conventions
-    3. Descriptiveness vs. length balance
-    4. Context-awareness in naming
-    5. Programming best practices
-    6. Syntactic Validity (Implicitly checked by render_code)
-    7. Improvement over initial map (Slight bonus for meaningful changes)
-
-    This function extracts identifier information from the rendered code and combines multiple metrics.
+    Evaluates an individual's fitness. Adjusted weights and logic
+    to potentially reward significant improvements more.
     """
     try:
-        rendered_code, tree = render_code(individual, lang, languages) # Tree might be useful later
-        if tree is None: # Check if parsing failed in render_code
-             return (0,) # Assign zero fitness if code is syntactically invalid
+        rendered_code, tree = render_code(individual, lang, languages)
+        if tree is None:
+             return (0,)
 
-        # Extract identifier names and their contexts from the rendered code.
-        # Consider using AST (tree) for more robust extraction if regex proves insufficient
-        identifier_info = extract_identifier_info(rendered_code, lang) # Renamed function
+        identifier_info = extract_identifier_info(rendered_code, lang)
         if not identifier_info:
-            # Penalize if no identifiers found, maybe code is trivial or extraction failed
-            return (0.1,) # Small non-zero fitness
+            return (0.1,)
 
-        # Calculate various metrics for the identifier names.
-        metrics = calculate_naming_metrics(identifier_info, individual["base_code"], individual["var_map"], initial_map) # Pass maps
+        # Calculate metrics
+        metrics = calculate_naming_metrics(identifier_info, individual["base_code"], individual["var_map"], initial_map)
 
-        # Combine metrics into a final score (Adjusted weights)
+        # --- Adjusted Weights ---
+        # Increase weight for semantics and descriptiveness, slightly reduce consistency,
+        # increase weight for improvement score to encourage change.
         score = (
-            metrics["semantics_score"] * 0.30 +
-            metrics["consistency_score"] * 0.20 + # Slightly less weight
-            metrics["descriptiveness_score"] * 0.25 + # More weight
-            metrics["context_score"] * 0.15 +
-            metrics["best_practices_score"] * 0.05 + # Less weight
-            metrics["improvement_score"] * 0.05 # Added small bonus for improvement
+            metrics["semantics_score"] * 0.35 +        # Increased
+            metrics["consistency_score"] * 0.15 +      # Decreased
+            metrics["descriptiveness_score"] * 0.25 +  # Kept same (already high)
+            metrics["context_score"] * 0.10 +          # Decreased (often overlaps descriptiveness)
+            metrics["best_practices_score"] * 0.05 +   # Kept low
+            metrics["improvement_score"] * 0.10        # Increased significantly
         )
 
         # Ensure score is within bounds
@@ -131,31 +95,22 @@ def evaluate_individual(individual, lang: str, languages: dict, initial_map: dic
         return (score,)
     except Exception as e:
         logger.error(f"Evaluation error for individual: {e}")
-        return (0,) # Penalize individuals that cause errors during evaluation
+        return (0,)
 
 
 #####################################
-# 4. Identifier Info Extraction and Metrics (Enhanced)
+# 4. Identifier Info Extraction and Metrics (Refined Scoring)
 #####################################
 
-# Patterns need to be general enough for many languages
-# These are indicative and might need refinement based on testing across languages
-# Using Tree-sitter queries here would be far more robust but adds complexity
+# (IDENTIFIER_PATTERNS and RESERVED_KEYWORDS remain the same)
 IDENTIFIER_PATTERNS = {
-    # Variables: let x = ..., var y = ..., const z: type = ..., int count = ... (Python, JS, C-likes, Rust, Swift, etc.)
     "variable_assignment": r'(?:let|var|const|int|float|double|string|char|bool|auto|final|val)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[:=]',
-    # Function parameters: function(a, b), def func(param: type), void process(int input)
     "function_parameter": r'(?:def|function|func|fn|void|int|float|string|bool|auto|public|private|static|suspend)\s+\w+\s*\(([^)]*)\)',
-    # Function definitions: def name(...), function name(...), ReturnType name(...)
     "function_definition": r'(?:def|function|func|fn|class|struct|enum)\s+([a-zA-Z_][a-zA-Z0-9_]+)\s*\(',
-    # Class/Struct definitions: class Name { ... }
     "class_definition": r'(?:class|struct|enum|interface|trait)\s+([A-Z_][a-zA-Z0-9_]+)',
-    # For loop variables: for (int i = ...), for item in items:
     "loop_variable": r'for\s*\(\s*(?:let|var|int|auto)?\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*[=:]',
-    "loop_iterator": r'for\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+in\s+', # Python/Rust style
+    "loop_iterator": r'for\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+in\s+',
 }
-
-# Keywords to ignore (expand this list based on target languages)
 RESERVED_KEYWORDS = set(['if', 'else', 'for', 'while', 'return', 'class', 'struct', 'enum', 'interface',
                        'public', 'private', 'static', 'const', 'let', 'var', 'def', 'function', 'fn', 'func',
                        'int', 'float', 'string', 'bool', 'void', 'auto', 'new', 'delete', 'try', 'catch',
@@ -163,785 +118,653 @@ RESERVED_KEYWORDS = set(['if', 'else', 'for', 'while', 'return', 'class', 'struc
                        'self', 'this', 'super', 'async', 'await', 'yield', 'match', 'case', 'switch', 'break',
                        'continue', 'pass', 'in', 'is', 'not', 'and', 'or', 'type', 'typeof', 'instanceof'])
 
-
+# (extract_identifier_info and find_identifier_usages remain the same)
+# These regex-based functions are still the weak point for complex code/languages.
+# AST-based analysis would be the primary way to significantly improve robustness here.
 def extract_identifier_info(code: str, lang: str) -> dict:
-    """
-    Language-agnostic approach to extract identifier names (variables, functions, classes) and contexts.
-    Uses regex patterns, acknowledging limitations. AST traversal would be superior.
-    """
     identifier_info = {}
-
+    # ... (existing logic) ...
     def add_identifier(name, context, expression=None):
         if name and name not in RESERVED_KEYWORDS and not name.isdigit() and name not in identifier_info:
              identifier_info[name] = {
-                 "context": context,
-                 "expressions": [expression.strip()] if expression else [],
-                 "usages": [] # Populated later
+                 "context": context, "expressions": [expression.strip()] if expression else [], "usages": []
              }
         elif name in identifier_info and expression:
-             # Append expression if identifier already found
              if 'expressions' not in identifier_info[name]: identifier_info[name]['expressions'] = []
              identifier_info[name]['expressions'].append(expression.strip())
-
-
-    # Pattern 1: Variable assignments
+    # ... (rest of the function) ...
     assignments = re.findall(IDENTIFIER_PATTERNS["variable_assignment"], code)
-    for var in assignments:
-        # Need context around the match to get the expression, regex alone is hard
-        # This part remains weak without AST or more complex regex
-        add_identifier(var, "variable_assignment", "unknown_expression") # Placeholder
-
-    # Pattern 2: Function parameters
+    for var in assignments: add_identifier(var, "variable_assignment", "unknown_expression")
     func_param_defs = re.findall(IDENTIFIER_PATTERNS["function_parameter"], code)
     for params_str in func_param_defs:
         params = params_str.split(',')
         for param in params:
-            param = param.strip()
+            param = param.strip();
             if not param: continue
-            # Try to extract name (e.g., "int count", "count: int", "count")
             match = re.search(r'(?:[\w\:]+\s+)?([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*[:=\[\]].*)?$', param)
-            if match:
-                param_name = match.group(1)
-                add_identifier(param_name, "parameter")
-
-    # Pattern 3: Function definitions
+            if match: add_identifier(match.group(1), "parameter")
     func_defs = re.findall(IDENTIFIER_PATTERNS["function_definition"], code)
-    for func_name in func_defs:
-        add_identifier(func_name, "function_definition")
-
-    # Pattern 4: Class definitions
+    for func_name in func_defs: add_identifier(func_name, "function_definition")
     class_defs = re.findall(IDENTIFIER_PATTERNS["class_definition"], code)
-    for class_name in class_defs:
-         add_identifier(class_name, "class_definition")
-
-    # Pattern 5: Loop variables (basic C-style)
+    for class_name in class_defs: add_identifier(class_name, "class_definition")
     loop_vars = re.findall(IDENTIFIER_PATTERNS["loop_variable"], code)
-    for var in loop_vars:
-        add_identifier(var, "loop_variable")
-
-    # Pattern 6: Loop iterators (Python/Rust style)
+    for var in loop_vars: add_identifier(var, "loop_variable")
     loop_iters = re.findall(IDENTIFIER_PATTERNS["loop_iterator"], code)
-    for var in loop_iters:
-        add_identifier(var, "loop_iterator")
-
-
-    # Find general identifier usages throughout the code.
-    # This is difficult with regex; it finds *potential* usages.
-    # Using \b (word boundary) helps avoid matching substrings within other words.
-    all_potential_identifiers = set(re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', code))
+    for var in loop_iters: add_identifier(var, "loop_iterator")
     found_identifiers = list(identifier_info.keys())
-
-    for ident in found_identifiers:
-        # Avoid re-calculating usages if already done (though this function recalculates all)
-        identifier_info[ident]["usages"] = find_identifier_usages(code, ident)
-
-    # Add identifiers found only through usage (less context, but still useful)
-    # for potential_ident in all_potential_identifiers:
-    #     if potential_ident not in identifier_info and potential_ident not in RESERVED_KEYWORDS and not potential_ident.isdigit() and len(potential_ident) > 1:
-    #          # Could add these with 'unknown' context, but might add noise.
-    #          # Let's rely on definition patterns for now.
-    #          pass
-
+    for ident in found_identifiers: identifier_info[ident]["usages"] = find_identifier_usages(code, ident)
     logger.debug(f"Extracted identifiers: {list(identifier_info.keys())}")
     return identifier_info
 
 def find_identifier_usages(code: str, identifier: str) -> list:
-    """
-    Identifies potential identifier usages across the code using regex.
-    Returns a list of dictionaries describing potential usage types.
-    NOTE: This is heuristic and can misinterpret context. AST is better.
-    """
     usages = []
-    # Use word boundaries (\b) to match whole words only
     ident_pattern = r'\b' + re.escape(identifier) + r'\b'
-
-    # Simple context checks using surrounding characters/keywords
-    # These are very basic examples
-
-    # Assignment (LHS): identifier = ...
-    if re.search(rf'{ident_pattern}\s*=[^=]', code): # Check for single '='
-        usages.append({"type": "assignment_lhs"})
-
-    # Assignment (RHS): ... = identifier
-    if re.search(rf'[^=]=\s*{ident_pattern}', code): # Check for single '='
-         usages.append({"type": "assignment_rhs"})
-
-    # Arithmetic: identifier +-*/ ... OR ... +-*/ identifier
-    if re.search(rf'{ident_pattern}\s*[\+\-\*\/]', code) or re.search(rf'[\+\-\*\/]\s*{ident_pattern}', code):
-        usages.append({"type": "arithmetic"})
-
-    # Comparison: identifier == != < > ... OR ... == != < > identifier
-    if re.search(rf'{ident_pattern}\s*(?:==|!=|<=|>=|<|>|===|!==)', code) or re.search(rf'(?:==|!=|<=|>=|<|>|===|!==)\s*{ident_pattern}', code):
-        usages.append({"type": "comparison"})
-
-    # Function call (as argument): func(..., identifier, ...)
+    # ... (existing regex logic) ...
+    if re.search(rf'{ident_pattern}\s*=[^=]', code): usages.append({"type": "assignment_lhs"})
+    if re.search(rf'[^=]=\s*{ident_pattern}', code): usages.append({"type": "assignment_rhs"})
+    if re.search(rf'{ident_pattern}\s*[\+\-\*\/]', code) or re.search(rf'[\+\-\*\/]\s*{ident_pattern}', code): usages.append({"type": "arithmetic"})
+    if re.search(rf'{ident_pattern}\s*(?:==|!=|<=|>=|<|>|===|!==)', code) or re.search(rf'(?:==|!=|<=|>=|<|>|===|!==)\s*{ident_pattern}', code): usages.append({"type": "comparison"})
     if re.search(rf'\w+\s*\([^)]*{ident_pattern}[^)]*\)', code):
-         # Exclude the case where the identifier *is* the function being called
-         if not re.search(rf'\b{identifier}\s*\(', code):
-              usages.append({"type": "function_argument"})
-
-    # Function call (being called): identifier(...)
-    if re.search(rf'{ident_pattern}\s*\(', code):
-        usages.append({"type": "function_call"})
-
-    # Return statement: return identifier; / return identifier\n
-    if re.search(rf'return\s+{ident_pattern}', code):
-        usages.append({"type": "return"})
-
-    # Conditional: if (... identifier ...)
-    if re.search(rf'(?:if|while|elif|case)\s*\([^)]*{ident_pattern}[^)]*\)', code):
-        usages.append({"type": "conditional_expression"})
-
-    # Property/Method Access (LHS): identifier.property / identifier.method()
-    if re.search(rf'{ident_pattern}\.\w+', code):
-        usages.append({"type": "property_method_access_lhs"})
-
-    # Property/Method Access (RHS): object.identifier
-    if re.search(rf'\w+\.{ident_pattern}', code):
-        usages.append({"type": "property_method_access_rhs"})
-
-    # Array/Collection Access: identifier[...]
-    if re.search(rf'{ident_pattern}\s*\[', code):
-        usages.append({"type": "collection_access"})
-
+         if not re.search(rf'\b{identifier}\s*\(', code): usages.append({"type": "function_argument"})
+    if re.search(rf'{ident_pattern}\s*\(', code): usages.append({"type": "function_call"})
+    if re.search(rf'return\s+{ident_pattern}', code): usages.append({"type": "return"})
+    if re.search(rf'(?:if|while|elif|case)\s*\([^)]*{ident_pattern}[^)]*\)', code): usages.append({"type": "conditional_expression"})
+    if re.search(rf'{ident_pattern}\.\w+', code): usages.append({"type": "property_method_access_lhs"})
+    if re.search(rf'\w+\.{ident_pattern}', code): usages.append({"type": "property_method_access_rhs"})
+    if re.search(rf'{ident_pattern}\s*\[', code): usages.append({"type": "collection_access"})
     return usages
 
 
 def calculate_naming_metrics(identifier_info: dict, original_code: str, current_map: dict, initial_map: dict) -> dict:
     """
-    Calculates various naming metrics based on identifier info. Now considers functions.
-    Includes a metric for improvement over the initial mapping.
+    Calculates naming metrics. Refined penalties/bonuses and improvement score calculation.
     """
     metrics = {
-        "semantics_score": 0.0,
-        "consistency_score": 0.0,
-        "descriptiveness_score": 0.0,
-        "context_score": 0.0,
-        "best_practices_score": 0.0,
-        "improvement_score": 0.0 # New metric
+        "semantics_score": 0.0, "consistency_score": 0.0, "descriptiveness_score": 0.0,
+        "context_score": 0.0, "best_practices_score": 0.0, "improvement_score": 0.0
     }
-    if not identifier_info:
-        return metrics
-
+    if not identifier_info: return metrics
     identifier_names = list(identifier_info.keys())
-    if not identifier_names:
-        return metrics
-
+    if not identifier_names: return metrics
     num_identifiers = len(identifier_names)
 
-    # --- Metric Calculations (Keep existing logic, potentially refine patterns/scores) ---
-    semantic_scores = []
-    common_patterns = get_common_naming_patterns() # Reuse existing patterns
+    # --- Semantic & Descriptiveness Score (Combined logic slightly) ---
+    semantic_descriptive_scores = []
+    common_patterns = get_common_naming_patterns() # Use updated patterns
     for ident, info in identifier_info.items():
-        ident_score = 0.5 # Base score
+        score = 0.5
         context = info.get("context", "unknown")
 
-        # Apply common patterns
+        # Apply common patterns (more impact now)
         for pattern, modifier in common_patterns.items():
-            if re.search(pattern, ident, re.IGNORECASE):
-                 ident_score += modifier
+             if re.search(pattern, ident, re.IGNORECASE):
+                  score += modifier * 1.2 # Amplify effect of good/bad patterns
 
-        # Penalties/Bonuses based on length and context
-        if len(ident) < 3 and ident.lower() not in ['i', 'j', 'k', 'x', 'y', 'z', 'id']: # Allow short common ones
-             ident_score -= 0.3
-        elif len(ident) > 25: # Penalize overly long names
-             ident_score -= 0.2
+        # Length penalties/bonuses
+        if len(ident) < 3 and ident.lower() not in ['i', 'j', 'k', 'x', 'y', 'z', 'id', 'db', 'io', 'ui']: score -= 0.35 # Stricter short names
+        elif len(ident) > 30: score -= 0.3 # Increased penalty for long names
+        elif len(ident) > 20: score -= 0.15 # Penalty for moderately long
 
-        # Function specific checks
+        # Context specific checks (slightly refined)
         if context == "function_definition":
-            # Bonus for verb-based names (crude check)
-            if any(ident.lower().startswith(verb) for verb in ["get", "set", "calculate", "process", "handle", "is", "has", "validate", "parse", "load", "save", "create", "update", "delete"]):
-                 ident_score += 0.2
-            # Penalize noun-like function names unless they are constructors/factories (hard to tell)
-            elif not any(ident.lower().endswith(verb) for verb in ["er", "or", "tion", "ment"]): # Very basic check
-                 pass # Avoid penalizing simple nouns for now
+            is_verb_ish = any(ident.lower().startswith(verb) for verb in ["get", "set", "calc", "proc", "handle", "is", "has", "val", "parse", "load", "save", "create", "update", "delete", "rend", "exec", "run", "build", "init"])
+            is_noun_ish = any(ident.lower().endswith(n) for n in ["er", "or", "tion", "ment", "ity", "data", "list", "map", "set", "config", "util"])
+            if is_verb_ish and not is_noun_ish: score += 0.15 # Reward verb-like function names
+            elif is_noun_ish and not is_verb_ish: score -= 0.1 # Slightly penalize pure noun functions unless clear reason
 
-        # Class specific checks
         elif context == "class_definition":
-             if not re.match(r'^[A-Z]', ident): # Penalize if not starting with Uppercase
-                 ident_score -= 0.2
-             if not any(ident.lower().endswith(suffix) for suffix in ["manager", "controller", "service", "provider", "handler", "util", "config", "model", "view"]):
-                 pass # Noun-based is generally good here
+            if not re.match(r'^[A-Z]', ident): score -= 0.25 # Stronger penalty
+            if not ident[0].isupper() or not any(c.islower() for c in ident[1:]): # Penalize ALL_CAPS class names unless very short
+                 if len(ident) > 4: score -= 0.1
 
-        # Anti-pattern check
-        if "mutated" in ident.lower(): # Keep penalty for "mutated" remnant
-            ident_score -= 0.4 * ident.lower().count("mutated")
-        if re.match(r'^(var|temp|tmp|data)\d*$', ident.lower()): # Penalize generic names
-             ident_score -= 0.3
+        # Stronger penalties for generic/bad names
+        if "mutated" in ident.lower(): score -= 0.5 * ident.lower().count("mutated")
+        if re.match(r'^(var|temp|tmp|data|val|value|obj|o|myvar|my_var)\d*$', ident.lower()): score -= 0.4
 
-        semantic_scores.append(max(0, min(1.0, ident_score)))
+        semantic_descriptive_scores.append(max(0, min(1.0, score)))
 
-    metrics["semantics_score"] = sum(semantic_scores) / num_identifiers if semantic_scores else 0
+    avg_sem_desc_score = sum(semantic_descriptive_scores) / num_identifiers if semantic_descriptive_scores else 0
+    # Assign this combined score to both, maybe adjust weights later if needed
+    metrics["semantics_score"] = avg_sem_desc_score
+    metrics["descriptiveness_score"] = avg_sem_desc_score
+    # Context score can be derived from usage analysis (kept simple here)
+    metrics["context_score"] = calculate_context_score(identifier_info) # Separate function for clarity
+
 
     # --- Consistency Score ---
     metrics["consistency_score"] = calculate_naming_consistency(identifier_names) # Use existing function
-
-    # --- Descriptiveness Score --- (Combine with context)
-    descriptive_context_scores = []
-    for ident, info in identifier_info.items():
-        context = info.get("context", "")
-        usages = info.get("usages", [])
-        score = 0.5 # Base
-
-        # Context-based scoring (simplified examples)
-        if context == "parameter":
-            if len(ident) >= 3: score += 0.1
-            if any(u.get("type") == "arithmetic" for u in usages):
-                 if any(term in ident.lower() for term in ["num", "operand", "value", "factor"]): score += 0.2
-            if any(u.get("type") == "conditional_expression" for u in usages):
-                 if any(term in ident.lower() for term in ["flag", "status", "condition", "enable"]): score += 0.2
-
-        elif context in ["loop_variable", "loop_iterator"]:
-            if ident.lower() in ["i", "j", "k", "index", "idx", "counter"]: score += 0.3
-            elif "index" in ident.lower() or "count" in ident.lower(): score += 0.2
-            else: score -= 0.1 # Penalize non-standard loop vars slightly
-
-        elif context == "function_definition":
-             if len(ident) > 5: score += 0.1 # Encourage descriptive function names
-             if any(u.get("type") == "return" for u in usages): # Does this make sense? Usage of the function name is 'call'
-                 pass # Logic needs rethink - maybe check return value type if AST was used
-
-        elif context == "class_definition":
-             if len(ident) > 4: score += 0.2 # Encourage descriptive class names
-
-        # Usage-based scoring
-        if any(u.get("type") == "return" for u in usages):
-            if any(term in ident.lower() for term in ["result", "output", "value", "data"]): score += 0.1
-        if any(u.get("type") == "conditional_expression" for u in usages):
-            if any(prefix in ident.lower() for prefix in ["is_", "has_", "should_", "can_"]) or ident.startswith("is") or ident.startswith("has"): score += 0.2
-            elif any(term in ident.lower() for term in ["flag", "state", "status", "valid"]): score += 0.1
-
-        # Combine descriptiveness and context scores
-        descriptive_context_scores.append(max(0, min(1.0, score)))
-
-    # Average them (crude combination)
-    avg_desc_ctx_score = sum(descriptive_context_scores) / num_identifiers if descriptive_context_scores else 0
-    metrics["descriptiveness_score"] = avg_desc_ctx_score
-    metrics["context_score"] = avg_desc_ctx_score # Use the same combined score for now
-
 
     # --- Best Practices Score ---
     bp_scores = []
     for ident in identifier_names:
         bp_score = 0.5
-        if len(ident) == 1 and ident.lower() not in ['i', 'j', 'k', 'x', 'y', 'z', 'n', 'm', 'c', 'e', 'f', 'g']: # Allow more single letters if common
+        if len(ident) == 1 and ident.lower() not in ['i', 'j', 'k', 'x', 'y', 'z', 'n', 'm', 'c', 'e', 'f', 'g', 'a', 'b', 'd', 'p', 'q', 'r', 's', 't', 'v', 'w']: # Allow more common single letters
              bp_score -= 0.2
-        # Penalize names like temp1, data2 etc. unless specific domain (e.g. utf8)
-        if re.match(r'^[a-zA-Z]+[0-9]+$', ident) and not re.match(r'^(utf|ascii|iso|md|sha)\d+$', ident.lower()):
-            bp_score -= 0.2
-        if ident.lower() in ["temp", "tmp", "var", "value", "val", "foo", "bar", "data", "obj", "o", "myvar"]: # More generics
-            bp_score -= 0.2
-        if 3 <= len(ident) <= 20: # Optimal length range
-            bp_score += 0.1
-        elif len(ident) > 25: # Penalize long names
-            bp_score -= 0.2
+        if re.match(r'^[a-zA-Z]+[0-9]+$', ident) and not re.match(r'^(utf|ascii|iso|md|sha|http)\d+$', ident.lower()): bp_score -= 0.25
+        if ident.lower() in ["temp", "tmp", "var", "value", "val", "foo", "bar", "data", "obj", "o", "myvar", "detail", "info"]: bp_score -= 0.3 # Stronger penalty
+        if 4 <= len(ident) <= 18: bp_score += 0.1 # Tighter optimal length
+        elif len(ident) > 25: bp_score -= 0.25
+        elif len(ident) < 3: bp_score -= 0.1 # Penalize length 2 unless allowed single char
 
-        # Discourage remnants of mutation markers if they slip through
-        if "mutated" in ident.lower() or "temp" in ident.lower() or "temp" in ident.lower():
-             bp_score -= 0.3
+        if "_" in ident and any(c.isupper() for c in ident): bp_score -= 0.1 # Penalize mixed snake_Case and CamelCase
 
         bp_scores.append(max(0, min(1.0, bp_score)))
     metrics["best_practices_score"] = sum(bp_scores) / num_identifiers if bp_scores else 0
 
 
-    # --- Improvement Score ---
-    # Calculate how many identifiers have changed *meaningfully* from the initial map
+    # --- Improvement Score (Refined) ---
+    # Reward more significant changes (using edit distance)
     changed_count = 0
-    meaningful_change_count = 0
-    current_ident_map = {}
-    # Map original names to current names
-    for orig_name, current_name in current_map.items():
-         # Need to find which original name maps to the identifiers present *in the rendered code*
-         # This is tricky because the LLM might rename things not in the initial map,
-         # or the extraction might find identifiers not mapped.
-         # Let's compare current names to initial names for *shared original keys*
-         if orig_name in initial_map:
-              initial_name = initial_map[orig_name]
-              if current_name != initial_name:
-                  changed_count += 1
-                  # Define "meaningful": not just adding underscores or changing case slightly, or removing 'Mutated'
-                  if initial_name.lower().replace("_", "") != current_name.lower().replace("_", "") and \
-                     score_variable_name(current_name) > score_variable_name(initial_name) + 0.1: # Check if score improved
-                      meaningful_change_count += 1
+    total_distance = 0
+    significant_change_count = 0
+    max_possible_distance = 0 # Theoretical max change
 
-    total_mapped = len(initial_map)
-    if total_mapped > 0:
-         # Reward meaningful changes more
-         metrics["improvement_score"] = (0.5 * (changed_count / total_mapped) + 0.5 * (meaningful_change_count / total_mapped))
-    else:
-         metrics["improvement_score"] = 0.0 # No initial map to compare against
+    original_keys_in_initial = set(initial_map.keys())
+    original_keys_in_current = set(current_map.keys())
+    relevant_keys = original_keys_in_initial.intersection(original_keys_in_current)
+
+    if not relevant_keys: # No common base to compare
+         metrics["improvement_score"] = 0.0
+         return metrics
+
+    for orig_key in relevant_keys:
+         initial_name = str(initial_map.get(orig_key, ""))
+         current_name = str(current_map.get(orig_key, ""))
+
+         if initial_name and current_name and initial_name != current_name:
+             changed_count += 1
+             distance = levenshtein_distance(initial_name, current_name)
+             total_distance += distance
+             max_possible_distance += max(len(initial_name), len(current_name)) # Approximation
+
+             # Define 'significant' change: distance > 2 and score improved
+             if distance > 2 and score_variable_name(current_name) > score_variable_name(initial_name):
+                  significant_change_count += 1
+
+    num_relevant = len(relevant_keys)
+    # Combine ratio of changed, ratio of significant changes, and normalized distance
+    change_ratio = changed_count / num_relevant
+    significant_ratio = significant_change_count / num_relevant
+    distance_ratio = (total_distance / max_possible_distance) if max_possible_distance > 0 else 0
+
+    # Give more weight to significant changes and distance
+    metrics["improvement_score"] = (0.2 * change_ratio +
+                                    0.5 * significant_ratio +
+                                    0.3 * distance_ratio)
+    metrics["improvement_score"] = max(0.0, min(1.0, metrics["improvement_score"])) # Clamp
 
     return metrics
 
+def calculate_context_score(identifier_info: dict) -> float:
+    """Calculates score based on how well name matches usage context."""
+    # This remains heuristic without deeper analysis (AST)
+    # Placeholder - Can be expanded based on find_identifier_usages results
+    context_scores = []
+    if not identifier_info: return 0.0
+    for ident, info in identifier_info.items():
+         score = 0.5
+         usages = info.get("usages", [])
+         # Example: If used in arithmetic, reward numeric/operand names
+         if any(u['type'] == 'arithmetic' for u in usages):
+             if any(term in ident.lower() for term in ["num", "val", "operand", "term", "factor", "sum", "diff", "prod", "quot"]): score += 0.2
+             else: score -= 0.1
+         # Example: If used as function call, reward verb-like names
+         if any(u['type'] == 'function_call' for u in usages):
+             if any(ident.lower().startswith(v) for v in ["get", "set", "calc", "proc", "is", "has", "run", "build"]): score += 0.15
+             else: score -= 0.05
+         # Example: If collection access involved, reward plural or collection names
+         if any(u['type'] == 'collection_access' for u in usages):
+              if ident.lower().endswith('s') or any(c in ident.lower() for c in ["list", "map", "dict", "set", "arr", "coll", "items", "elements"]): score += 0.2
+              else: score -= 0.1
 
+         context_scores.append(max(0.0, min(1.0, score)))
+
+    return sum(context_scores) / len(context_scores) if context_scores else 0.0
+
+
+# Levenshtein distance for Improvement Score
+def levenshtein_distance(s1, s2):
+    if len(s1) < len(s2): return levenshtein_distance(s2, s1)
+    if len(s2) == 0: return len(s1)
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    return previous_row[-1]
+
+
+# (calculate_naming_consistency remains the same)
 def calculate_naming_consistency(identifier_names: list) -> float:
-    """
-    Evaluates naming consistency based on dominant casing style.
-    Improved robustness for mixed lists or undefined styles.
-    """
-    if not identifier_names or len(identifier_names) < 2:
-        return 1.0
-
+    if not identifier_names or len(identifier_names) < 2: return 1.0
     casing_patterns = {
-        # Order matters slightly: check specific before general
-        "PascalCase": r'^[A-Z][a-zA-Z0-9]*$', # Must start Upper
-        "camelCase": r'^[a-z][a-zA-Z0-9]*$', # Must start lower
-        "snake_case": r'^[a-z][a-z0-9_]*[a-z0-9]$', # Must start/end lower, allows underscore
-        "UPPER_SNAKE": r'^[A-Z][A-Z0-9_]*[A-Z0-9]$', # Must start/end upper, allows underscore
-        "kebab-case": r'^[a-z][a-z0-9\-]*[a-z0-9]$', # Allows hyphen
-         # Add more if needed (e.g., Hungarian notation - harder to detect reliably)
+        "PascalCase": r'^[A-Z][a-zA-Z0-9]*$', "camelCase": r'^[a-z][a-zA-Z0-9]*$',
+        "snake_case": r'^[a-z][a-z0-9_]*[a-z0-9]$', "UPPER_SNAKE": r'^[A-Z][A-Z0-9_]*[A-Z0-9]$',
+        "kebab-case": r'^[a-z][a-z0-9\-]*[a-z0-9]$',
     }
-    style_counts = {style: 0 for style in casing_patterns}
-    unmatched_count = 0
-
+    style_counts = {style: 0 for style in casing_patterns}; unmatched_count = 0
     for ident in identifier_names:
-         # Ignore single-letter identifiers for consistency checks as they often don't conform
-         if len(ident) <= 1:
-              continue
+         if len(ident) <= 1: continue
          matched = False
          for style, pattern in casing_patterns.items():
              if re.match(pattern, ident):
-                 # Prioritize PascalCase/UPPER_SNAKE if it also matches camel/snake
-                 if style == "camelCase" and re.match(casing_patterns["PascalCase"], ident):
-                      continue # Skip camel if it's Pascal
-                 if style == "snake_case" and re.match(casing_patterns["UPPER_SNAKE"], ident):
-                      continue # Skip snake if it's UPPER_SNAKE
-
-                 style_counts[style] += 1
-                 matched = True
-                 break # Count first match (after priority checks)
-         if not matched:
-             unmatched_count += 1
-
+                 if style == "camelCase" and re.match(casing_patterns["PascalCase"], ident): continue
+                 if style == "snake_case" and re.match(casing_patterns["UPPER_SNAKE"], ident): continue
+                 style_counts[style] += 1; matched = True; break
+         if not matched: unmatched_count += 1
     total_considered = len([ident for ident in identifier_names if len(ident)>1])
-    if total_considered == 0: return 1.0 # All names were single letters
-
-    if not style_counts or all(v == 0 for v in style_counts.values()):
-         # If no patterns matched (e.g., all names are weird like 'a_B_c')
-         return 0.0 # Low consistency
-
-    # Find the count of the most frequent style
+    if total_considered == 0: return 1.0
+    if not style_counts or all(v == 0 for v in style_counts.values()): return 0.0
     dominant_count = max(style_counts.values())
-
-    # Calculate consistency score
     consistency = dominant_count / total_considered
     return consistency
 
+
 def get_common_naming_patterns() -> dict:
-    """
-    Returns a dictionary of common identifier naming patterns and associated score modifiers.
-    Added patterns for functions/classes.
-    """
+    """Updated patterns with refined modifiers."""
     return {
-        # General Concepts
-        r'count|total|sum|average|mean': 0.2,
-        r'index|idx|pos|offset': 0.2,
-        r'result|output|return': 0.2,
-        r'input|arg|param|data': 0.1, # Slightly less positive for generic input terms
-        r'first|second|third|last|prev|next': 0.2,
-        r'start|end|begin|finish|init': 0.2,
-        r'min|max|limit|bound': 0.2,
-        r'value|val': 0.1, # Generic
-        r'name|key|id|identifier': 0.2,
-        r'length|size|width|height|dim': 0.2,
-        r'element|item|member|entry': 0.2,
-        # Boolean/Flags
-        r'^(?:is|has|can|should|allow|enable|check|validate)': 0.3,
-        r'flag|status|state|valid|active|ready': 0.2,
-        # Arithmetic/Numeric
-        r'operand|factor|term|coeff': 0.3,
-        r'multiplier|divisor|dividend|numerator|denominator|ratio': 0.3,
-        # Functions/Actions (often verbs)
-        r'get|set|add|remove|update|delete|create|find|search|load|save': 0.2,
-        r'process|handle|execute|run|start|stop|parse|convert|render': 0.2,
-        r'calculate|compute|measure|estimate': 0.2,
-        # Collections
-        r'list|array|vector|sequence|items|elements': 0.2,
-        r'map|dict|table|lookup|cache': 0.2,
-        r'queue|stack|deque': 0.2,
-        r'set|group|collection': 0.2,
-        # OO/Structure
-        r'manager|controller|service|provider|repository|factory|builder': 0.2,
-        r'handler|listener|observer|subscriber|interceptor': 0.2,
-        r'config|settings|options|context|env': 0.2,
-        r'util|helper|support|common': 0.1,
-        r'model|view|presenter|entity|dto|record|struct': 0.2,
-        r'node|edge|vertex|graph|tree': 0.2,
-        r'root|parent|child|leaf': 0.2,
-        # Penalties
-        r'temp|tmp': -0.2,
-        r'foo|bar|baz': -0.3,
-        r'data|obj|info|detail': -0.1, # Penalize overly generic nouns
-        r'^[a-rt-wz]$': -0.1, # Single letters (except common i,j,k,x,y,z)
-        r'mutated': -0.4, # Stronger penalty
-        r'^(var|val|temp|tmp|data)[0-9]+$': -0.3, # Penalize var1, data2 etc.
-        r'^[a-z]{1,2}[0-9]+$': -0.2 # Penalize ab1, c2 etc.
+        # --- Strong Positives ---
+        r'^(?:is|has|can|should|allow|enable|check|validate)': 0.35, # Boolean prefixes
+        r'index|idx|pos|offset': 0.25,
+        r'count|total|sum|average|mean|aggregate': 0.3,
+        r'min|max|limit|bound|range': 0.25,
+        r'get|fetch|retrieve|load': 0.2, # Getter verbs
+        r'set|update|assign|store|save': 0.2, # Setter verbs
+        r'add|append|insert|push': 0.2, # Add verbs
+        r'remove|delete|pop|clear': 0.2, # Remove verbs
+        r'create|build|generate|make': 0.2, # Creation verbs
+        r'process|handle|execute|run|perform|invoke': 0.25, # Action verbs
+        r'parse|decode|extract': 0.25,
+        r'convert|transform|map|format': 0.25,
+        r'render|display|show|draw|paint': 0.2,
+        r'config|setting|option|pref': 0.25, # Configuration
+        r'context|env|session|state': 0.2, # Context/State
+        r'manager|controller|service|provider|repository|factory|builder': 0.25, # Design patterns
+        r'handler|listener|observer|subscriber|interceptor|callback|delegate': 0.25, # Event patterns
+        r'util|helper|support|common|shared': 0.15, # Utilities (slightly less score)
+        r'model|view|presenter|entity|dto|record|struct|schema': 0.25, # Data structures
+        r'node|edge|vertex|graph|tree|root|parent|child|leaf': 0.25, # Graph/Tree terms
+        r'list|array|vector|sequence|items|elements|collection': 0.25, # Collections
+        r'map|dict|table|lookup|cache|index': 0.25, # Mappings
+        r'queue|stack|deque|buffer': 0.25, # Queues/Stacks
+        r'key|id|identifier|uuid|token': 0.25, # Identifiers
+        r'name|label|title|desc': 0.2, # Naming/Descriptions
+        r'path|url|uri|route': 0.25, # Paths/URLs
+        r'error|exception|fault|warning|issue|log': 0.2, # Error handling
+        # --- Mild Positives ---
+        r'input|arg|param': 0.1,
+        r'output|result|return': 0.15,
+        r'value|val': 0.05, # Very generic
+        r'first|last|prev|next|current|old|new': 0.15,
+        r'start|end|begin|finish|init|term': 0.15,
+        r'flag|status|active|ready|valid': 0.2, # Status flags
+        r'size|width|height|length|dim': 0.2,
+        r'operand|factor|term|coeff|ratio': 0.2, # Math terms (can be good)
+        # --- Strong Negatives ---
+        r'temp|tmp': -0.4,
+        r'foo|bar|baz|qux': -0.5,
+        r'data|obj|info|detail|item|element': -0.3, # Overly generic nouns
+        r'^(var|val|temp|tmp|data|xxx|stuff|things)\d*$': -0.4, # Generic + number
+        r'^[a-z]{1,2}$': -0.3, # Single/double lower letters (allow i,j,k etc via best prac.)
+        r'^[A-Z]{1,2}$': -0.25, # Single/double upper letters
+        r'^[a-z]{1,2}[0-9]+$': -0.35, # ab1, c2 etc.
+        r'mutated|interim|intermediate': -0.4, # Avoid process state in name
+        r'string|int|float|bool|dict|list|array': -0.2, # Avoid type names in variable names usually
+        r'_+$': -0.2, # Trailing underscores (unless private convention)
+        r'^_': -0.1, # Leading underscore (often convention, slight penalty unless known)
     }
 
+
 #####################################
-# 5. Mutation Operator (LLM Enhanced)
+# 5. Mutation Operator (Enhanced LLM Interaction)
 #####################################
 
-def mutate_mapping_llm(individual, lang: str, languages: dict):
+def mutate_mapping_llm_enhanced(individual, lang: str, languages: dict):
     """
-    LLM-enhanced, language-agnostic mutation operator.
-    Selects one or more identifiers (variables or functions) from the *current* mapping,
-    gets context-aware naming suggestions from an LLM, and updates the mapping.
+    Enhanced LLM mutation: Gets multiple suggestions, selects one based on novelty and quality.
     """
     current_map = individual["var_map"]
-    if not current_map:
-        logger.warning("Mutation skipped: Individual has empty mapping.")
-        return individual, # No change if map is empty
+    if not current_map: return individual,
+    base_code = individual["base_code"]
 
-    base_code = individual["base_code"] # Needed for context
-
-    # Render the *current* code to analyze its state before mutation
     try:
         current_code, _ = render_code(individual, lang, languages)
-        # Extract info from the *current* code to find candidate identifiers
         identifier_info = extract_identifier_info(current_code, lang)
     except Exception as e:
-        logger.error(f"Mutation skipped: Error rendering or extracting info for mutation: {e}")
-        return individual, # Skip mutation if rendering/extraction fails
-
-    # Find original names corresponding to current identifiers
-    # This requires reversing the map logic slightly or finding a better way
-    # Let's try to mutate based on *original* names present in the map keys
+        logger.error(f"Mutation skipped: Error rendering/extracting info: {e}")
+        return individual,
 
     candidates = list(current_map.keys())
-    if not candidates:
-         logger.warning("Mutation skipped: No original names found in mapping keys.")
-         return individual, # No keys to mutate
+    if not candidates: return individual,
 
-    # --- Strategy: Mutate 1 to 3 identifiers per call ---
     num_to_mutate = random.randint(1, min(3, len(candidates)))
     keys_to_mutate = random.sample(candidates, num_to_mutate)
-
     logger.debug(f"Attempting to mutate original keys: {keys_to_mutate}")
-
     successful_mutations = 0
-    for original_key in keys_to_mutate:
-        current_name = current_map.get(original_key)
-        if not current_name:
-            logger.warning(f"Skipping mutation for key '{original_key}': Not found in current map.")
-            continue
 
-        # Try to get context for the *current_name* in the *current_code*
-        context_snippet = find_context_snippet(current_code, current_name) # Helper function needed
+    for original_key in keys_to_mutate:
+        current_name = str(current_map.get(original_key, ""))
+        if not current_name: continue
+
+        context_snippet = find_context_snippet(current_code, current_name)
+        if not context_snippet: context_snippet = current_code # Fallback to full code
 
         try:
-            # *** LLM Call for Suggestion ***
-            suggested_name = suggest_better_name(
+            # *** LLM Call for MULTIPLE Suggestions ***
+            suggested_names = suggest_better_names( # Note plural function name
                 original_name=original_key,
                 current_name=current_name,
-                code_context=context_snippet or current_code, # Provide snippet or full code
-                lang=lang
+                code_context=context_snippet,
+                lang=lang,
+                count=3 # Ask for 3 suggestions
             )
 
-            if suggested_name and suggested_name != current_name:
-                # Basic sanity check on suggested name
-                if re.match(r'^[a-zA-Z_][a-zA-Z0-9_\-]*$', suggested_name) and suggested_name not in RESERVED_KEYWORDS:
-                    logger.info(f"Mutating '{original_key}': '{current_name}' -> '{suggested_name}'")
-                    current_map[original_key] = suggested_name # Update the individual's map
-                    successful_mutations += 1
-                else:
-                    logger.warning(f"LLM suggested invalid name '{suggested_name}' for '{current_name}', skipping.")
-            # else: No suggestion or same name returned by LLM
+            if not suggested_names: continue # Skip if LLM returns nothing
+
+            # --- Selection Strategy ---
+            # Score suggestions and select one. Prioritize valid, different, high-scoring names.
+            best_suggestion = None
+            highest_score = -1.0
+            current_score = score_variable_name(current_name)
+
+            valid_suggestions = []
+            for sugg in suggested_names:
+                sugg_clean = re.sub(r'^[`"\']|[`"\']$', '', str(sugg)).strip()
+                # Validate identifier format and check against keywords
+                if sugg_clean and sugg_clean != current_name and \
+                   re.match(r'^[a-zA-Z_][a-zA-Z0-9_\-]*$', sugg_clean) and \
+                   sugg_clean not in RESERVED_KEYWORDS:
+                    valid_suggestions.append(sugg_clean)
+
+            if not valid_suggestions: continue # No good suggestions
+
+            # Score valid suggestions
+            scored_suggestions = []
+            for sugg in valid_suggestions:
+                 sugg_score = score_variable_name(sugg)
+                 # Calculate novelty (difference from current name)
+                 distance = levenshtein_distance(current_name, sugg)
+                 novelty_bonus = min(0.15, 0.05 * distance) # Small bonus for being different
+                 combined_score = sugg_score + novelty_bonus
+                 scored_suggestions.append({"name": sugg, "score": sugg_score, "combined": combined_score})
+
+            # Sort by combined score (quality + novelty)
+            scored_suggestions.sort(key=lambda x: x["combined"], reverse=True)
+
+            # Select the best one, but maybe add randomness if scores are close?
+            if scored_suggestions:
+                 best_suggestion = scored_suggestions[0]["name"]
+                 # Optional: If top scores are very close, pick randomly among top N?
+                 # top_score = scored_suggestions[0]["combined"]
+                 # close_suggestions = [s for s in scored_suggestions if s["combined"] >= top_score - 0.05]
+                 # best_suggestion = random.choice(close_suggestions)["name"]
+
+            # --- Apply Mutation ---
+            if best_suggestion:
+                 logger.info(f"Mutating '{original_key}': '{current_name}' -> '{best_suggestion}' (score: {scored_suggestions[0]['score']:.2f}, combined: {scored_suggestions[0]['combined']:.2f})")
+                 current_map[original_key] = best_suggestion
+                 successful_mutations += 1
+            # else: No suitable suggestion found after filtering and scoring
 
         except Exception as e:
-            logger.error(f"Error getting LLM suggestion for '{current_name}': {e}")
-            # Optionally, fallback to a simpler mutation? For now, just log and continue.
+            logger.error(f"Error getting LLM suggestion list for '{current_name}': {e}")
 
-    # If mutation occurred, the fitness must be re-evaluated
     if successful_mutations > 0:
-         del individual.fitness.values # Invalidate fitness
+         del individual.fitness.values
+    return individual,
 
-    return individual, # Return the possibly modified individual
-
+# (find_context_snippet remains the same)
 def find_context_snippet(code: str, identifier: str, window=5) -> str:
-    """
-    Helper to find a few lines of code surrounding the first occurrence of an identifier.
-    """
     lines = code.splitlines()
     ident_pattern = r'\b' + re.escape(identifier) + r'\b'
     first_occurrence_line = -1
-
     for i, line in enumerate(lines):
         if re.search(ident_pattern, line):
-            first_occurrence_line = i
-            break
-
+            first_occurrence_line = i; break
     if first_occurrence_line != -1:
         start = max(0, first_occurrence_line - window)
         end = min(len(lines), first_occurrence_line + window + 1)
         return "\n".join(lines[start:end])
-    else:
-        return None # Identifier not found (shouldn't happen if called correctly)
+    return None
 
-
-# Remove or comment out the old rule-based mutation functions
-# def mutate_mapping(...): ...
-# def generate_improved_name(...): ...
-# def determine_variable_role(...): ...
-# def generate_role_based_name(...): ...
-
-
+# (score_variable_name remains largely the same - it's for quick crossover checks)
 def score_variable_name(name: str) -> float:
-    """
-    Provides a *quick* score for an identifier name's quality.
-    Used primarily in crossover, less detailed than full evaluation.
-    Kept simple for speed.
-    """
     score = 0.5
-    if not name or not isinstance(name, str): return 0.0 # Handle potential non-string values
-
+    if not name or not isinstance(name, str): return 0.0
     name_lower = name.lower()
-
-    # Penalties for obvious anti-patterns
+    # --- Penalties ---
     if "mutated" in name_lower: score -= 0.4 * name_lower.count("mutated")
     if name_lower in ["temp", "tmp", "var", "val", "foo", "bar", "baz", "data", "obj", "o", "myvar"]: score -= 0.2
-    if re.match(r'^[a-zA-Z]+[0-9]+$', name) and not re.match(r'^(utf|ascii|iso|md|sha)\d+$', name_lower): score -= 0.15
-    if len(name) == 1 and name_lower not in ['i', 'j', 'k', 'x', 'y', 'z', 'n', 'm', 'c', 'e', 'f', 'g']: score -= 0.2
-
-    # Bonuses for length and potential keywords
-    if 3 <= len(name) <= 20: score += 0.1
+    if re.match(r'^[a-zA-Z]+[0-9]+$', name) and not re.match(r'^(utf|ascii|iso|md|sha|http)\d+$', name_lower): score -= 0.15
+    if len(name) == 1 and name_lower not in ['i', 'j', 'k', 'x', 'y', 'z', 'n', 'm', 'c', 'e', 'f', 'g', 'a', 'b', 'd', 'p', 'q', 'r', 's', 't', 'v', 'w']: score -= 0.2
+    # --- Bonuses ---
+    if 4 <= len(name) <= 18: score += 0.1 # Adjusted length bonus
     elif len(name) > 25: score -= 0.15
-    else: score -= 0.05 # Penalty for very short (2) or slightly long (21-25)
-
-    common_terms = ["count", "total", "sum", "index", "result", "input", "output", "name", "key", "id", "value",
-                    "list", "map", "array", "set", "queue", "stack", "node", "item", "element", "flag", "status",
-                    "is", "has", "can", "should", "get", "set", "add", "process", "handle", "config", "util"]
-    if any(term in name_lower for term in common_terms):
-        score += 0.1
-
-    if re.match(r'^[A-Z]', name) and not name.isupper(): # PascalCase likely
-         score += 0.05
-    elif re.match(r'^[a-z]', name) and '_' in name: # snake_case likely
-         score += 0.05
-    elif re.match(r'^[a-z]', name) and not '_' in name: # camelCase likely
-         score += 0.05
-
+    else: score -= 0.05 # Penalty for 2, 3 or 19-25 length
+    common_terms = [...] # Use list from get_common_naming_patterns keys if needed, or keep simpler list
+    # Simplified check for crossover score:
+    if any(term in name_lower for term in ["count", "total", "index", "result", "value", "list", "map", "node", "flag", "is", "has", "get", "set", "add", "process"]): score += 0.1
+    if re.match(r'^[A-Z]', name) and not name.isupper(): score += 0.05 # PascalCase
+    elif re.match(r'^[a-z]', name) and '_' in name: score += 0.05 # snake_case
+    elif re.match(r'^[a-z]', name) and not '_' in name: score += 0.05 # camelCase
     return max(0.0, min(1.0, score))
 
 
 #####################################
-# 6. Improved Crossover Operator
+# 6. Improved Crossover Operator (Adjusted Threshold)
 #####################################
-# (Keep the existing improved_crossover_mapping, it's reasonable)
-# It uses score_variable_name for efficiency.
 def improved_crossover_mapping(ind1, ind2):
     """
-    Intelligent crossover merging mappings based on quick quality scores (score_variable_name).
-    Assigns the better-scoring name for shared keys to both offspring, with some randomness.
+    Intelligent crossover. Increased threshold slightly to avoid swapping for minimal score diffs.
     """
     map1 = ind1["var_map"]
     map2 = ind2["var_map"]
     new_map1 = {}
     new_map2 = {}
-    all_vars = set(map1.keys()) | set(map2.keys()) # Union of original variable keys
+    all_vars = set(map1.keys()) | set(map2.keys())
+
+    # --- Score Difference Threshold ---
+    SCORE_DIFF_THRESHOLD = 0.15 # Was 0.1 - requires a more significant difference to force swap
 
     for var_key in all_vars:
         name1 = map1.get(var_key)
         name2 = map2.get(var_key)
-
-        # Ensure names are valid strings before scoring
         name1_str = str(name1) if name1 is not None else ""
         name2_str = str(name2) if name2 is not None else ""
-
         score1 = score_variable_name(name1_str) if name1_str else 0
         score2 = score_variable_name(name2_str) if name2_str else 0
 
-        # Decide which name to propagate
-        if name1_str and name2_str: # Both parents have a mapping for this key
-            # Use a threshold to avoid swapping very similar scores, adds stability
-            if score1 > score2 + 0.1:
+        if name1_str and name2_str:
+            if score1 > score2 + SCORE_DIFF_THRESHOLD:
                 chosen_name = name1_str
-            elif score2 > score1 + 0.1:
+            elif score2 > score1 + SCORE_DIFF_THRESHOLD:
                 chosen_name = name2_str
-            else:
-                # Scores are close, choose randomly or based on slight edge
-                chosen_name = name1_str if score1 >= score2 else name2_str
-                # Add small chance to keep original parent's name even if slightly worse
-                if random.random() < 0.2:
-                     new_map1[var_key] = name1_str
-                     new_map2[var_key] = name2_str
-                     continue # Skip common assignment below
+            else: # Scores are close or equal
+                # Keep original names more often when scores are close (50/50 chance)
+                if random.random() < 0.5:
+                    new_map1[var_key] = name1_str
+                    new_map2[var_key] = name2_str
+                else: # Or choose the slightly better one / randomly
+                    chosen_name = name1_str if score1 >= score2 else name2_str
+                    new_map1[var_key] = chosen_name
+                    new_map2[var_key] = chosen_name
+                continue # Skip common assignment below
 
             new_map1[var_key] = chosen_name
             new_map2[var_key] = chosen_name
 
-        elif name1_str: # Only parent 1 has this key
+        elif name1_str:
             new_map1[var_key] = name1_str
-            new_map2[var_key] = name1_str # Propagate to parent 2
-        elif name2_str: # Only parent 2 has this key
-            new_map1[var_key] = name2_str # Propagate to parent 1
+            new_map2[var_key] = name1_str
+        elif name2_str:
+            new_map1[var_key] = name2_str
             new_map2[var_key] = name2_str
-        # else: Neither parent had the key (shouldn't happen with set union logic)
 
     ind1["var_map"] = new_map1
     ind2["var_map"] = new_map2
-    # Invalidate fitness after crossover
     del ind1.fitness.values
     del ind2.fitness.values
     return ind1, ind2
 
 
 #####################################
-# 7. GA Setup and Execution (Adjusted)
+# 7. GA Setup and Execution (Adjusted Parameters)
 #####################################
-def run_ga(initial_code: str, lang: str, languages: dict, population_size: int = 20, generations: int = 15, initial_map_retries=2): # Increased defaults
+def run_ga(initial_code: str, lang: str, languages: dict, population_size: int = 20, generations: int = 15, initial_map_retries=2):
     """
-    Runs the mapping-based genetic algorithm:
-    1. Obtains an initial identifier mapping (vars & funcs) from LLM. Includes retries.
-    2. Initializes a population using the base code and the initial mapping.
-    3. Evolves the population using LLM-enhanced mutation and quality-based crossover.
-    4. Evaluation uses multiple naming metrics, including an improvement score.
-    5. Uses an adaptive mutation rate.
-    6. Returns the rendered (deobfuscated) code from the best individual found.
+    Runs the GA with adjusted parameters for continued improvement.
+    - Higher base mutation rate.
+    - More aggressive adaptive mutation increase.
+    - Uses enhanced LLM mutation.
     """
     initial_map = None
+    # ... (initial map loading logic remains same) ...
     for attempt in range(initial_map_retries):
         try:
             logger.info(f"Attempting to get initial mapping (attempt {attempt+1}/{initial_map_retries})...")
-            # *** Ensure get_variable_mapping asks for functions too ***
             initial_map = get_variable_mapping(initial_code, lang)
-            if initial_map: # Break if successful
-                 # Sanitize map: Ensure values are strings
-                 initial_map = {str(k): str(v) for k, v in initial_map.items() if v} # Filter empty values
+            if initial_map:
+                 initial_map = {str(k): str(v) for k, v in initial_map.items() if v}
                  break
         except Exception as e:
             logger.error(f"Could not obtain initial mapping (attempt {attempt+1}): {e}")
             if attempt == initial_map_retries - 1:
-                 logger.error("Failed to get initial mapping after multiple retries. Aborting.")
-                 return initial_code # Return original code on failure
-            # Optional: wait before retry? time.sleep(1)
-
+                 logger.error("Failed to get initial mapping. Aborting.")
+                 return initial_code
     if not initial_map:
-         logger.warning("Proceeding without an initial LLM mapping. GA might be less effective.")
-         initial_map = {} # Start with an empty map if LLM fails completely
+         logger.warning("Proceeding without an initial LLM mapping.")
+         initial_map = {}
 
     logger.info(f"Initial Mapping ({len(initial_map)} identifiers): {initial_map}")
-
     pop = init_population(population_size, initial_code, initial_map)
-
     toolbox = base.Toolbox()
-    # Pass initial_map to evaluator
     toolbox.register("evaluate", evaluate_individual, lang=lang, languages=languages, initial_map=initial_map)
     toolbox.register("mate", improved_crossover_mapping)
-    # Use the new LLM-based mutation
-    toolbox.register("mutate", mutate_mapping_llm, lang=lang, languages=languages)
+    # Use the *new* enhanced mutation operator
+    toolbox.register("mutate", mutate_mapping_llm_enhanced, lang=lang, languages=languages)
     toolbox.register("select", tools.selTournament, tournsize=3)
 
-    # Evaluate initial population.
+    # Evaluate initial population
     logger.info("Evaluating initial population...")
     try:
         fitnesses = list(map(toolbox.evaluate, pop))
-        for ind, fit in zip(pop, fitnesses):
-            ind.fitness.values = fit
-            logger.debug(f"Initial fitness: {fit[0]:.4f}")
+        for ind, fit in zip(pop, fitnesses): ind.fitness.values = fit
     except Exception as e:
         logger.error(f"Error evaluating initial population: {e}. Cannot proceed.")
         return initial_code
 
-    # Adaptive mutation rate initial setting.
-    base_mutation_prob = 0.3 # Slightly higher base mutation
+    # --- Adjusted GA Parameters ---
+    base_mutation_prob = 0.35 # Higher base mutation chance
     mutation_prob = base_mutation_prob
     stagnation_counter = 0
-    max_stagnation = 4 # Increase mutation more aggressively if stagnated for this many gens
+    max_stagnation = 3 # Trigger increase faster
+    mutation_increase_factor = 0.10 # Increase mutation rate more sharply
+    max_mutation_prob = 0.85 # Allow mutation rate to go higher
 
-    hof = tools.HallOfFame(1) # Hall of Fame to store the best individual found
-
+    hof = tools.HallOfFame(1)
     stats = tools.Statistics(lambda ind: ind.fitness.values)
-    stats.register("avg", lambda f: sum(v[0] for v in f) / len(f)) # Use f[0] for single objective
+    stats.register("avg", lambda f: sum(v[0] for v in f) / len(f))
     stats.register("std", lambda f: (sum((v[0] - (sum(x[0] for x in f) / len(f)))**2 for v in f) / len(f))**0.5)
     stats.register("min", lambda f: min(v[0] for v in f))
     stats.register("max", lambda f: max(v[0] for v in f))
 
     logger.info("Starting GA evolution...")
+    last_best_overall_score = -1.0 # Initialize differently
+
     for gen in range(generations):
-        # Selection
+        # --- Standard GA Operations ---
         offspring = toolbox.select(pop, len(pop))
-        # Clone offspring to avoid modifying originals directly during crossover/mutation
-        offspring = [creator.Individual(ind) for ind in offspring] # Use constructor for deep copy like behavior for the dict structure.
+        offspring = [creator.Individual(ind) for ind in offspring]
 
-        # Apply Crossover
-        # Iterate over pairs (doesn't modify the list size)
+        # Crossover (adjust probability slightly?)
+        crossover_prob = 0.6
         for i in range(0, len(offspring) - 1, 2):
-            if random.random() < 0.6: # Crossover probability
+            if random.random() < crossover_prob:
                 toolbox.mate(offspring[i], offspring[i+1])
-                # Fitness is invalidated inside mate function
 
-        # Apply Mutation (Adaptive)
+        # Mutation (Adaptive)
         mutated_count = 0
         for i in range(len(offspring)):
              if random.random() < mutation_prob:
                   toolbox.mutate(offspring[i])
                   mutated_count += 1
-                  # Fitness is invalidated inside mutate function
 
-        # Evaluate individuals with invalid fitness (those that underwent mate or mutate)
+        # Evaluate invalid individuals
         invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
         if invalid_ind:
              fitnesses = list(map(toolbox.evaluate, invalid_ind))
              for ind, fit in zip(invalid_ind, fitnesses):
                  ind.fitness.values = fit
 
-        # Update Hall of Fame
+        # Update Hall of Fame *before* checking stagnation
         hof.update(offspring)
+        current_best_overall_score = hof[0].fitness.values[0] # Best ever found
 
-        # Replace population with offspring
+        # Replace population
         pop[:] = offspring
 
-        # Gather statistics
+        # --- Statistics and Logging ---
         record = stats.compile(pop)
-        best_current_score = record['max']
-        best_overall_score = hof[0].fitness.values[0] # Best ever found
-
+        best_current_gen_score = record['max']
         logger.info(f"Gen {gen+1}/{generations}: "
-                    f"Best Score: {best_current_score:.4f} (Overall: {best_overall_score:.4f}), "
+                    f"Best Score: {best_current_gen_score:.4f} (Overall: {current_best_overall_score:.4f}), "
                     f"Avg: {record['avg']:.4f}, Min: {record['min']:.4f}, "
-                    f"Mutated: {mutated_count}, MutProb: {mutation_prob:.2f}")
+                    f"Mutated: {mutated_count}, MutProb: {mutation_prob:.3f}") # More precision
 
-
-        # Adaptive Mutation Rate Adjustment
-        if hof.items[0].fitness.values[0] <= best_overall_score and gen > 0: # Compare with previous best overall
+        # --- Adaptive Mutation Rate Adjustment (More Aggressive) ---
+        # Check if the best *overall* score has improved since the *last generation*
+        improvement_threshold = 0.0001 # Require at least a tiny improvement to reset stagnation
+        if gen > 0 and current_best_overall_score <= last_best_overall_score + improvement_threshold :
              stagnation_counter += 1
-             logger.debug(f"Stagnation detected (counter: {stagnation_counter}). Best score: {best_overall_score:.4f}")
-             if stagnation_counter >= max_stagnation // 2: # Start increasing earlier
-                 mutation_prob = min(0.7, mutation_prob + 0.05) # Increase mutation rate more gradually
-                 logger.debug(f"Increasing mutation probability to {mutation_prob:.2f}")
+             logger.debug(f"Stagnation detected (counter: {stagnation_counter}). Best score: {current_best_overall_score:.4f}")
+             if stagnation_counter >= max_stagnation: # Trigger increase faster
+                 mutation_prob = min(max_mutation_prob, mutation_prob + mutation_increase_factor)
+                 logger.debug(f"Increasing mutation probability to {mutation_prob:.3f}")
+                 stagnation_counter = 0 # Reset counter after increase to allow some time
+             elif stagnation_counter == 1: # Less aggressive initial increase
+                  mutation_prob = min(max_mutation_prob, mutation_prob + mutation_increase_factor / 2)
+
 
         else:
-             # Improvement or first gen
+             # Improvement occurred
+             if gen > 0: logger.debug("Improvement detected.")
              stagnation_counter = 0
-             mutation_prob = base_mutation_prob # Reset to base if improvement occurs
-             logger.debug(f"Improvement detected or first gen. Resetting mutation probability to {mutation_prob:.2f}")
-             # Update best overall score if needed (already handled by HOF logic)
+             mutation_prob = base_mutation_prob # Reset to base
+
+        last_best_overall_score = current_best_overall_score # Store score for next gen comparison
 
 
     # --- GA finished ---
-    best_ind = hof[0] # Get the best individual from Hall of Fame
+    best_ind = hof[0]
     logger.info(f"GA finished. Best overall score: {best_ind.fitness.values[0]:.4f}")
     logger.info(f"Best mapping found: {best_ind['var_map']}")
-
     try:
-        # Render the final code from the best individual
         final_code, _ = render_code(best_ind, lang, languages)
         logger.info("Final code rendered successfully.")
         return final_code
     except Exception as e:
          logger.error(f"Failed to render final code from best individual: {e}")
-         return initial_code # Fallback to initial code if final rendering fails
+         return initial_code
+
 
 #####################################
 # 8. Main / Example Usage
 #####################################
+# (No changes needed in the __main__ block)
 if __name__ == "__main__":
     import sys
-    sys.path.append('..') # Add parent directory to path if running script directly
-    from app.parser_module import load_languages # Adjust import path if needed
+    # Add parent dir if needed: sys.path.append('..')
+    try:
+        from app.parser_module import load_languages
+    except ImportError:
+         print("Error: Could not import app.parser_module. Make sure PYTHONPATH is set correctly or run as a module.", file=sys.stderr)
+         sys.exit(1)
 
-    # More complex example
+
     sample_code_py = """
 def proc_dat(d_list, thresh):
     res = []
@@ -961,9 +784,8 @@ class My_Calc:
           self.val_ += v2
           return self.val_
 """
-
-    # Setup basic logging
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    # Setup logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s') # Added logger name
 
     try:
         langs = load_languages()
@@ -971,25 +793,22 @@ class My_Calc:
             print("Error: Python language grammar not loaded.", file=sys.stderr)
             sys.exit(1)
 
-        print("Running GA for Python code...")
+        print("Running GA for Python code (Enhanced)...")
         best_code = run_ga(
             initial_code=sample_code_py,
             lang="python",
             languages=langs,
-            population_size=10, # Smaller for quick testing
-            generations=5      # Fewer for quick testing
+            population_size=15, # Can adjust
+            generations=10     # Can adjust
         )
-
         print("\n--- Initial Obfuscated Code ---")
         print(sample_code_py)
         print("\n--- Final Deobfuscated Code ---")
-        if best_code:
-            print(best_code)
-        else:
-            print("GA execution failed to produce final code.")
+        if best_code: print(best_code)
+        else: print("GA execution failed to produce final code.")
 
     except ImportError as e:
-         print(f"Import Error: {e}. Make sure modules are correctly structured and dependencies are installed.", file=sys.stderr)
+         print(f"Import Error: {e}. Make sure modules are correctly structured.", file=sys.stderr)
     except Exception as e:
          print(f"An unexpected error occurred: {e}", file=sys.stderr)
          import traceback
