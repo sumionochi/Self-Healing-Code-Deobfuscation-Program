@@ -495,3 +495,77 @@ def remove_dead_code_llm(code: str, lang: str, **kwargs) -> str | None:
         logger.error(f"LLM call failed during dead code removal: {e}", exc_info=True)
         return None # Indicate critical failure
     
+def format_comment_code_llm(code: str, lang: str, **kwargs) -> str | None:
+    """
+    Uses an LLM to apply standard formatting and add explanatory comments/docstrings.
+
+    Args:
+        code: The source code string (presumably cleaned and simplified by previous stages).
+        lang: The programming language identifier.
+        **kwargs: Additional arguments for the LLM call (e.g., model, temperature).
+
+    Returns:
+        The code string potentially formatted and commented,
+        or None if a critical error occurs during the LLM call.
+        Returns the original code string if the LLM indicates no changes were made.
+    """
+    logger.info(f"Requesting LLM for formatting and commenting (lang: {lang})...")
+
+    # Instructions for the LLM
+    instructions = f"""
+    1.  **Reformat Code:** Apply standard code formatting conventions commonly used for the '{lang}' language (e.g., indentation, spacing, line breaks). Aim for consistency and readability according to typical style guides (like PEP 8 for Python, Google Style Guide for Java/C++, common Prettier rules for JS/TS, etc.).
+    2.  **Add Comments/Docstrings:**
+        * Generate documentation strings (docstrings, JSDoc, JavaDoc, XML Docs depending on '{lang}') for public functions, classes, and methods. Explain their purpose, parameters, and return values based on the code logic and (presumably improved) identifier names.
+        * Add brief, clear inline comments for complex or non-obvious sections of code (e.g., tricky algorithms, complex calculations, important logic branches).
+        * Do not over-comment simple or self-explanatory code. Focus on adding value.
+    3.  **Preserve Logic:** Ensure that formatting and commenting do not alter the code's logic or functionality in any way.
+    4.  **Return Full Code:** Return the **entire modified code block** as a single response, including the formatting and comments/docstrings. Do not add explanations or markdown formatting around the code.
+    """
+
+    prompt = f"""
+        You are an expert code formatter and documentation assistant for the '{lang}' language.
+        Your task is to reformat the following code according to standard conventions and add helpful comments and documentation strings.
+
+        Code to process:
+        {code}
+
+
+        **Instructions:**
+        {instructions}
+
+        Formatted and Commented Code Only:
+        """
+
+    try:
+        # Formatting might benefit from determinism, comments from creativity.
+        # A moderate temperature might balance this.
+        llm_model = kwargs.get("llm_model", "gpt-4o-mini")
+        temperature = kwargs.get("temperature", 0.3) # Slightly higher temp for comment generation
+
+        response = openai.ChatCompletion.create(
+            model=llm_model,
+            messages=[
+                {"role": "system", "content": f"You are a code formatter and documentation assistant for {lang}. You only output formatted and commented code."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=temperature,
+            max_tokens=max(2048, len(code.split()) + 1024), # Allow ample space for comments/formatting
+            n=1,
+            stop=None
+        )
+
+        formatted_code = response.choices[0].message.content.strip()
+        # Clean LLM Output
+        formatted_code = re.sub(r'^```[a-zA-Z]*\s*|\s*```$', '', formatted_code).strip()
+
+        if not formatted_code:
+            logger.warning("LLM returned empty response for formatting/commenting.")
+            return code # Return original code if LLM gives up
+        else:
+            # Return potentially modified code (could be same if already perfect)
+            return formatted_code
+
+    except Exception as e:
+        logger.error(f"LLM call failed during formatting/commenting: {e}", exc_info=True)
+        return None # Indicate critical failure
+    
