@@ -422,28 +422,41 @@ def simplify_expressions_llm(code: str, lang: str, **kwargs) -> str | None:
     
 def remove_dead_code_llm(code: str, lang: str, **kwargs) -> str | None:
     """
-    Uses an LLM to cautiously identify and remove dead/unreachable code.
-
+    Uses an LLM to identify and remove dead/unreachable code with improved accuracy.
+    
     Args:
         code: The source code string.
         lang: The programming language identifier.
-        **kwargs: Additional arguments for the LLM call (e.g., model, temperature).
-
+        **kwargs: Additional arguments for the LLM call.
+        
     Returns:
-        The code string potentially modified with dead code removed,
-        or None if a critical error occurs during the LLM call.
-        Returns the original code string if the LLM indicates no changes were made or possible.
+        The code string with dead code removed, or None if an error occurs.
     """
     logger.info(f"Requesting LLM for dead code removal (lang: {lang})...")
-
-    # Emphasize safety and specific types of dead code
+    
+    # More specific types of dead code with clear examples
     dead_code_types = """
+    - Code after return/break/continue/throw: Any code following these statements in the same block is unreachable.
+      Example: `return x; print("dead");` - The print statement will never execute.
+    
+    - Code in always-false conditions: `if (false) { ... }` or `if (0) { ... }` in languages where 0 is falsy.
+      Example: `if (False): print("dead")` - This print will never execute.
+    
+    - Else branches after always-true conditions: `if (true) { ... } else { ... }` - The else block never executes.
+      Example: `if (True): x=1; else: x=2;` - x will always be 1, never 2.
+    
+    - Unreachable loop iterations: Code after a return/break in a loop.
+      Example: `for i in range(5): return x; print("dead")` - The print never executes.
+    
+    - Unused variables: Variables declared but never used.
+      Example: `x = 10; y = 20; return x;` - y is never used.
+      
     - Unused Local Variables: Variables declared within a function/scope but never read or used.
     - Unused Private/Static Functions: Functions not exported and never called from within the analyzed code block (be cautious of external calls, reflection, etc.).
     - Unreachable Code: Code immediately following unconditional return, break, continue, or throw statements within the same block.
     - Redundant/No-Operation Code: Statements that have no effect.
     """
-
+    
     prompt = f"""
         You are an expert code analysis assistant for the '{lang}' language, focused **ONLY** on **safely removing obviously dead or unreachable code**.
         Analyze the following '{lang}' code:
@@ -463,37 +476,34 @@ def remove_dead_code_llm(code: str, lang: str, **kwargs) -> str | None:
 
         Modified Code Only:
         """
-
+    
     try:
-        # Use a model known for strong reasoning, maybe slightly higher temp might explore *what* could be dead, but safety demands caution. Let's keep temp low.
-        llm_model = kwargs.get("llm_model", "gpt-4o-mini") # Consider GPT-4 for better reasoning if needed
-        temperature = kwargs.get("temperature", 0.1) # Very low temp for safety
-
+        llm_model = kwargs.get("llm_model", "gpt-4o-mini")
+        temperature = kwargs.get("temperature", 0.9)
+        
         response = openai.ChatCompletion.create(
             model=llm_model,
             messages=[
-                {"role": "system", "content": f"You are a highly cautious code analysis assistant for {lang} focused *only* on safely removing dead code. You only output code."},
+                {"role": "system", "content": f"You are a code optimization assistant that removes dead code from {lang} programs."},
                 {"role": "user", "content": prompt}
             ],
             temperature=temperature,
-            max_tokens=max(2048, len(code.split()) + 256), # Allow some shrinkage, but still need buffer
-            n=1,
-            stop=None
+            max_tokens=max(2048, len(code.split()) + 256),
+            n=1
         )
-
+        
         cleaned_code = response.choices[0].message.content.strip()
-        # Clean LLM Output
         cleaned_code = re.sub(r'^```[a-zA-Z]*\s*|\s*```$', '', cleaned_code).strip()
-
+        
         if not cleaned_code:
             logger.warning("LLM returned empty response for dead code removal.")
-            return code # Return original code if LLM gives up
+            return code
         else:
-            return cleaned_code # Return potentially modified code
-
+            return cleaned_code
+            
     except Exception as e:
         logger.error(f"LLM call failed during dead code removal: {e}", exc_info=True)
-        return None # Indicate critical failure
+        return None
     
 def format_comment_code_llm(code: str, lang: str, **kwargs) -> str | None:
     """

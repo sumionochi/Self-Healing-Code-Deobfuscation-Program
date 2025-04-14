@@ -20,11 +20,11 @@ logger = logging.getLogger(__name__)
 #####################################
 # Add 'history' to track changes? Could be complex. Stick with map for now.
 creator.create("FitnessMax", base.Fitness, weights=(1.0,))
-creator.create("Individual", dict, fitness=creator.FitnessMax)
+creator.create("IndividualStage1", dict, fitness=creator.FitnessMax)
 
 # (init_individual and init_population remain the same)
 def init_individual(base_code: str, var_map: dict):
-    ind = creator.Individual()
+    ind = creator.IndividualStage1()
     ind["base_code"] = base_code
     ind["var_map"] = var_map
     return ind
@@ -678,7 +678,7 @@ def run_stage1_ga_rename(initial_code: str, lang: str, languages: dict, populati
     for gen in range(generations):
         # --- Standard GA Operations ---
         offspring = toolbox.select(pop, len(pop))
-        offspring = [creator.Individual(ind) for ind in offspring]
+        offspring = [creator.IndividualStage1(ind) for ind in offspring]
 
         # Crossover (adjust probability slightly?)
         crossover_prob = 0.6

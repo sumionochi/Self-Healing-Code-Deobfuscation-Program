@@ -31,14 +31,14 @@ SIMPLIFICATION_FLAGS = [
 WORST_FITNESS = (float('inf'), float('inf'))
 creator.create("FitnessMin", base.Fitness, weights=(-1.0, -0.5))
 # Individual holds a list of booleans (flags)
-creator.create("Individual", list, fitness=creator.FitnessMin) # Use list for individuals
+creator.create("IndividualStage3", list, fitness=creator.FitnessMin) # Use list for individuals
 
 toolbox = base.Toolbox()
 
 # Attribute generator: A boolean value (0 or 1)
 toolbox.register("attr_bool", random.randint, 0, 1)
 # Structure initializers: Create individuals as lists of booleans
-toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr_bool, len(SIMPLIFICATION_FLAGS))
+toolbox.register("individual", tools.initRepeat, creator.IndividualStage3, toolbox.attr_bool, len(SIMPLIFICATION_FLAGS))
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
 # --- Genetic Operators ---
@@ -112,7 +112,7 @@ def evaluate_control_flow(individual: list, # Type hint: expecting a list of 0s/
 
 # --- Main Stage Function ---
 
-def run_stage3_ga_controlflow(initial_code: str, lang: str, languages: dict, pop_size: int, generations: int, **kwargs) -> str | None:
+def run_stage3_ga_controlflow(initial_code: str, lang: str, languages: dict, population_size: int, generations: int, **kwargs) -> str | None:
     """
     Runs the GA for Stage 3: Control Flow Simplification.
 
@@ -120,7 +120,7 @@ def run_stage3_ga_controlflow(initial_code: str, lang: str, languages: dict, pop
         initial_code: Code string from the previous stage.
         lang: Language identifier.
         languages: Loaded tree-sitter languages.
-        pop_size: Population size for the GA.
+        population_size: Population size for the GA.
         generations: Number of generations for the GA.
         **kwargs: Additional parameters passed to evaluation (e.g., llm_model).
 
@@ -140,7 +140,7 @@ def run_stage3_ga_controlflow(initial_code: str, lang: str, languages: dict, pop
                      base_code=initial_code, lang=lang, languages=languages, **kwargs)
 
     # Create population
-    pop = toolbox.population(n=pop_size)
+    pop = toolbox.population(n=population_size)
     hof = tools.HallOfFame(1) # Store the best individual
 
     # Setup statistics
@@ -151,7 +151,7 @@ def run_stage3_ga_controlflow(initial_code: str, lang: str, languages: dict, pop
 
     # --- Run GA ---
     try:
-        logger.info(f"Starting GA evolution for {generations} generations with population size {pop_size}...")
+        logger.info(f"Starting GA evolution for {generations} generations with population size {population_size}...")
         # Use a standard evolutionary algorithm
         pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=0.6, mutpb=0.2, # Adjusted probabilities
                                            ngen=generations, stats=stats,
@@ -234,7 +234,7 @@ int main() {
                  initial_code=test_code_c,
                  lang="c",
                  languages=loaded_langs,
-                 pop_size=10, generations=3 # Small run for testing
+                 population_size=10, generations=3 # Small run for testing
              )
              print("\n--- Original Code ---")
              print(test_code_c)

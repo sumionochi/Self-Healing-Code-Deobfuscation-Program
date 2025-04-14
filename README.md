@@ -34,3 +34,13 @@ source venv/bin/activate
 python -m app.main --codefile obfuscated/obfuscated_code_five.php --lang php --mode direct --pop_size 10 --generations 5 --output deobfuscated/deobfuscated_code_five.php
 
 python -m app.main --codefile obfuscated/obfuscated_code.c --lang c --mode ga --pop_size 10 --generations 5 --output deobfuscated/deobfuscated_code.c
+
+---------------------------
+
+python -m app.main \
+    --codefile obfuscated/obfuscated_code.py \
+    --lang python \
+    --interactive \
+    --population_size 10 \
+    --generations 5 \ 
+    --output deobfuscated/deobfuscated_code.py 

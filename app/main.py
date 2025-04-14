@@ -67,7 +67,7 @@ def main():
     parser.add_argument("--interactive", action='store_true', help="Enable interactive mode ('multi_stage' only).")
     parser.add_argument("--output", type=Path, default=None, help="Optional output file for the final code.")
     parser.add_argument("--temp_dir", type=Path, default="./deobfuscation_temp", help="Directory for intermediate stage outputs.")
-    parser.add_argument("--pop_size", type=int, default=15, help="Population size for GA stages (1 & 3).")
+    parser.add_argument("--population_size", type=int, default=15, help="Population size for GA stages (1 & 3).")
     parser.add_argument("--generations", type=int, default=10, help="Number of generations for GA stages (1 & 3).")
     args = parser.parse_args()
 
@@ -129,7 +129,7 @@ def main():
 
         # Stage Definitions (updated based on previous agreement)
         common_params = {"lang": args.lang, "languages": languages}
-        ga_params = {"pop_size": args.pop_size, "generations": args.generations}
+        ga_params = {"population_size": args.population_size, "generations": args.generations}
         stages = {
             1: {"name": "Renaming (GA+LLM)", "func": run_stage1_ga_rename, "is_ga": True},
             2: {"name": "String Deobfuscation (LLM)", "func": run_stage2_llm_strings, "is_ga": False},
@@ -201,7 +201,6 @@ def main():
         else:
             # --- Interactive Menu Execution ---
             logger.info("Starting interactive multi-stage process...")
-            # (Interactive loop logic remains the same as previous version)
             previous_code_content = initial_code
             while True:
                 print("\n--- Interactive Deobfuscation Menu ---")
@@ -228,16 +227,24 @@ def main():
                     if next_stage_to_run <= last_successful_stage:
                         if prompt_for_action(f"Stage {next_stage_to_run} already completed. Re-run? (y/n):") != 'y': continue
                     elif next_stage_to_run > last_successful_stage + 1:
-                         if prompt_for_action(f"Warning: Run Stage {next_stage_to_run} before {last_successful_stage + 1}? (y/n):") != 'y': continue
+                        if prompt_for_action(f"Warning: Run Stage {next_stage_to_run} before {last_successful_stage + 1}? This will use the original input file. Continue? (y/n):") != 'y': continue
 
                     # Determine input code...
                     input_stage_num = next_stage_to_run - 1
-                    input_path = output_files[input_stage_num]
-                    if not input_path or not input_path.is_file():
-                        logger.error("Cannot run Stage %d: Input file from Stage %d (%s) not found or invalid.", next_stage_to_run, input_stage_num, input_path)
-                        continue
-                    try: input_code_str = input_path.read_text(encoding='utf-8')
-                    except Exception as e: logger.error("Error reading input file %s: %s", input_path, e); continue
+                    # CHANGE: If previous stage output doesn't exist, use original input
+                    if input_stage_num <= last_successful_stage and output_files[input_stage_num] and output_files[input_stage_num].is_file():
+                        input_path = output_files[input_stage_num]
+                        try: 
+                            input_code_str = input_path.read_text(encoding='utf-8')
+                        except Exception as e: 
+                            logger.error("Error reading input file %s: %s", input_path, e)
+                            logger.info("Falling back to original input file.")
+                            input_code_str = initial_code
+                    else:
+                        # Use original input if no previous output exists
+                        logger.info(f"No output from Stage {input_stage_num} found. Using original input file.")
+                        input_code_str = initial_code
+                        input_path = args.codefile
 
                     # Execute stage...
                     previous_code_content = input_code_str
