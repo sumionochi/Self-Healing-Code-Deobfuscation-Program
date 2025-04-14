@@ -6,6 +6,8 @@ This project provides **multiple ways** to deobfuscate code:
 2. A **FastAPI** server (`api_server.py`) that offers an HTTP API for multi-stage or direct transformations, enabling more flexible or remote usage.
 3. A **VS Code Extension** that connects to the API, provides a **graphical UI**, and handles interactive stage control, code diffs, status checks, etc., right in your editor.
 
+<img width="1074" alt="image" src="https://github.com/user-attachments/assets/1e2f2da4-dcb2-46ae-864f-b375bf25369f" />
+
 ## Table of Contents
 
 - [Overview](#overview)
@@ -46,7 +48,7 @@ This repository implements a **multi-stage** approach to **deobfuscating** sourc
 - **Hybrid GA+LLM**: Applies evolutionary search to rename identifiers or simplify control flow, but uses the LLM for guidance and rendering suggestions.
 - **Targeted LLM Passes**: String decoding, expression simplification, dead code removal, etc.  
 - **Syntax Validation**: After each major transformation, Tree-sitter validates that the code remains syntactically correct.
-- **Supports Multiple Languages**: Build the relevant Tree-sitter grammars to handle languages like Python, C, Java, JavaScript, etc.
+- **Supports Multiple Languages**: Build the relevant Tree-sitter grammars to handle 20+ mainstream languages Python, C, Java, JavaScript, etc.
 - **CLI or Automated**: You can run the tool from the command line (with interactive or automated mode). 
 - **API + VS Code**: Alternatively, run a FastAPI server that offers these transformations via HTTP, and a VS Code extension that provides a GUI with live diffing, stage controls, and status updates.
 
@@ -139,6 +141,12 @@ You can run **all** transformations from the command line by calling `main.py`:
 ```bash
 python -m app.main --codefile <file> --lang <language> [options...]
 ```
+
+<img width="1396" alt="Screenshot 2025-04-14 at 11 15 01 AM" src="https://github.com/user-attachments/assets/5e80be4a-9f97-498d-b8f2-30b4ffe7fb33" />
+
+<img width="1395" alt="Screenshot 2025-04-14 at 11 18 23 AM" src="https://github.com/user-attachments/assets/7dd9a2ff-f494-4aec-8b19-a7ee5c36272a" />
+
+
 
 **Key CLI Arguments**:
 
@@ -244,6 +252,8 @@ Make sure you compile the grammar for each language you wish to handle.
 
 In addition to `main.py`, you can run a **FastAPI server** that exposes endpoints for direct or multi-stage transformations. This allows you to integrate with other tools or use the **VS Code extension**.
 
+<img width="1384" alt="image" src="https://github.com/user-attachments/assets/866abd1d-488b-46da-998a-ee7813ef58ef" />
+
 1. **Install** any additional dependencies in Python:
    ```bash
    pip install fastapi uvicorn
@@ -270,6 +280,8 @@ In addition to `main.py`, you can run a **FastAPI server** that exposes endpoint
 | **GET**  | `/deobfuscate/jobs/{job_id}/result`                 | Retrieves the final code after completion.                           |
 
 ### Using the VS Code Extension
+
+<img width="1077" alt="image" src="https://github.com/user-attachments/assets/9e188bf4-538c-436d-84f4-1e8194548a9e" />
 
 1. **Open** the `vscode-extension/` folder in Visual Studio Code.
 2. **Install** extension dependencies:
