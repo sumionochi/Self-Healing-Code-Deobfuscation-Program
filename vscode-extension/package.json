@@ -1,0 +1,38 @@
+{
+  "name": "self-healing-code-file-ext",
+  "displayName": "Self-Healing Code (File-based) Extension",
+  "description": "Replicates main.py arguments by sending codefile paths to the Self-Healing Code API.",
+  "version": "1.0.0",
+  "publisher": "YourName",
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "activationEvents": [
+    "onCommand:selfHealingCode.openPanel"
+  ],
+  "main": "./out/extension.js",
+  "categories": [
+    "Other"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "selfHealingCode.openPanel",
+        "title": "Open Self-Healing Code Panel"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^16.0.0",
+    "@types/node-fetch": "^2.6.12",
+    "@types/vscode": "^1.70.0",
+    "typescript": "^4.7.0"
+  },
+  "dependencies": {
+    "node-fetch": "^2.7.0"
+  }
+}

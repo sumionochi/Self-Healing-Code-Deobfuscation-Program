@@ -23,3 +23,5 @@ networkx
 
 # Optional: python-dotenv for managing environment variables (like API keys)
 python-dotenv
+
+pip install fastapi "uvicorn[standard]" pydantic

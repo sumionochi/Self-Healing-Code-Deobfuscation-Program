@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Self-Healing Code Extension</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 1rem;
+    }
+    .section {
+      border: 1px solid black;
+      padding: 1rem;
+      margin-bottom: 1rem;
+      border-radius: 4px;
+    }
+    .section h2 {
+      margin-top: 0;
+    }
+    label {
+      display: inline-block;
+      margin-top: 0.5rem;
+      font-weight: bold;
+    }
+    select, input[type="text"], input[type="number"] {
+      display: block;
+      width: 100%;
+      margin-bottom: 1rem;
+    }
+    .response {
+      margin-top: 0.5rem;
+      white-space: pre-wrap;
+      background: white;
+      color: black;
+      border: 1px solid black;
+      padding: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Self-Healing Code: File-Based Deobfuscation</h1>
+
+  <div class="section">
+    <h2>CLI-Style Arguments</h2>
+
+    <label for="codefile">Codefile (path on server)</label>
+    <input type="text" id="codefile" placeholder="/path/to/obfuscated_file.py" />
+
+    <label for="lang">Language</label>
+    <select id="lang">
+      <option value="python">python</option>
+      <option value="javascript">javascript</option>
+      <option value="c">c</option>
+      <option value="php">php</option>
+      <option value="scala">scala</option>
+      <option value="jsdoc">jsdoc</option>
+      <option value="css">css</option>
+      <option value="ql">ql</option>
+      <option value="regex">regex</option>
+      <option value="html">html</option>
+      <option value="java">java</option>
+      <option value="bash">bash</option>
+      <option value="typescript">typescript</option>
+      <option value="julia">julia</option>
+      <option value="haskell">haskell</option>
+      <option value="c_sharp">c_sharp</option>
+      <option value="embedded_template">embedded_template [erb (embedded Ruby), ejs (embedded JS)]</option>
+      <option value="agda">agda</option>
+      <option value="verilog">verilog</option>
+      <option value="toml">toml</option>
+      <option value="swift">swift</option>
+    </select>
+
+    <label for="mode">Mode</label>
+    <select id="mode">
+      <option value="multi_stage">multi_stage</option>
+      <option value="direct">direct</option>
+    </select>
+
+    <label for="interactive">Interactive</label>
+    <select id="interactive">
+      <option value="false">false</option>
+      <option value="true">true</option>
+    </select>
+
+    <label for="populationSize">Population Size</label>
+    <input type="number" id="populationSize" value="15" />
+
+    <label for="generations">Generations</label>
+    <input type="number" id="generations" value="10" />
+
+    <label for="tempDir">Temp Directory</label>
+    <input type="text" id="tempDir" value="./deobfuscation_temp" />
+
+    <label for="outputFile">Output File (Optional)</label>
+    <input type="text" id="outputFile" placeholder="/path/to/final_output.py" />
+
+    <button id="submitBtn">Submit</button>
+    <div id="submitResponse" class="response"></div>
+  </div>
+
+  <!-- If multi_stage job, we show additional controls below. -->
+  <div class="section" id="jobSection" style="display:none;">
+    <h2>Multi-Stage Controls</h2>
+    <label for="jobId">Job ID</label>
+    <input type="text" id="jobId" readonly />
+
+    <button id="checkStatusBtn">Check Status</button>
+    <button id="runRemainingBtn">Run Remaining Stages</button>
+    <div id="statusResponse" class="response"></div>
+    <hr />
+
+    <label for="stageNum">Stage Number (1-6)</label>
+    <input type="number" id="stageNum" min="1" max="6" value="1" />
+    <button id="runStageBtn">Run This Stage</button>
+    <div id="runStageResponse" class="response"></div>
+    <hr />
+
+    <label for="viewStageCode">View Code from Stage #</label>
+    <input type="number" id="viewStageCode" min="0" max="6" value="0" />
+    <button id="viewCodeBtn">View Code</button>
+    <div id="codeResponse" class="response"></div>
+    <hr />
+
+    <label for="diffStageNum">Diff for Stage #</label>
+    <input type="number" id="diffStageNum" min="1" max="6" value="1" />
+    <button id="viewDiffBtn">View Diff</button>
+    <div id="diffResponse" class="response"></div>
+  </div>
+
+  <div class="section" id="directSection" style="display:none;">
+    <h2>Direct Mode Output</h2>
+    <div id="directOutput" class="response"></div>
+  </div>
+
+  <script>
+    // This is plain JS, not TypeScript, so we remove all 'as <Type>' assertions.
+
+    const vscode = acquireVsCodeApi();
+
+    function makeApiCall(endpoint, method = 'GET', payload = null) {
+      return new Promise((resolve, reject) => {
+        const reqId = 'req_' + Math.random().toString(36).slice(2);
+        const listener = (evt) => {
+          const msg = evt.data;
+          if (msg.command === 'apiResponse' && msg.requestId === reqId) {
+            window.removeEventListener('message', listener);
+            if (msg.success) {
+              resolve(msg.data);
+            } else {
+              reject(msg.error);
+            }
+          }
+        };
+        window.addEventListener('message', listener);
+
+        vscode.postMessage({
+          command: 'makeApiCall',
+          requestId: reqId,
+          data: { endpoint, method, payload }
+        });
+      });
+    }
+
+    document.getElementById('submitBtn').addEventListener('click', async () => {
+      const codefile = document.getElementById('codefile').value.trim();
+      const lang = document.getElementById('lang').value;
+      const mode = document.getElementById('mode').value;
+      const interactive = (document.getElementById('interactive').value === 'true');
+      const populationSize = Number(document.getElementById('populationSize').value);
+      const generations = Number(document.getElementById('generations').value);
+      const tempDir = document.getElementById('tempDir').value;
+      const outputFile = document.getElementById('outputFile').value.trim() || null;
+
+      const submitResp = document.getElementById('submitResponse');
+      const jobSection = document.getElementById('jobSection');
+      const directSection = document.getElementById('directSection');
+      const directOutput = document.getElementById('directOutput');
+
+      submitResp.textContent = "Submitting...";
+      jobSection.style.display = 'none';
+      directSection.style.display = 'none';
+      directOutput.textContent = "";
+
+      try {
+        const payload = {
+          codefile,
+          lang,
+          mode,
+          interactive,
+          output: outputFile,
+          temp_dir: tempDir,
+          population_size: populationSize,
+          generations
+        };
+        const data = await makeApiCall('/deobfuscate/', 'POST', payload);
+        submitResp.textContent = JSON.stringify(data, null, 2);
+
+        if (mode === 'direct') {
+          // Show direct output
+          directSection.style.display = 'block';
+          directOutput.textContent = data.final_code || "(No direct output)";
+        } else {
+          // multi_stage
+          if (data.job_id) {
+            document.getElementById('jobId').value = data.job_id;
+            jobSection.style.display = 'block';
+          }
+          // If job is queued automatically, you can check status later
+        }
+      } catch (err) {
+        submitResp.textContent = "Error: " + err;
+      }
+    });
+
+    document.getElementById('checkStatusBtn').addEventListener('click', async () => {
+      const jobId = document.getElementById('jobId').value;
+      const statusResp = document.getElementById('statusResponse');
+      statusResp.textContent = "Checking status...";
+      try {
+        const data = await makeApiCall(`/deobfuscate/jobs/${jobId}/status`);
+        statusResp.textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        statusResp.textContent = "Error: " + err;
+      }
+    });
+
+    document.getElementById('runRemainingBtn').addEventListener('click', async () => {
+      const jobId = document.getElementById('jobId').value;
+      const statusResp = document.getElementById('statusResponse');
+      statusResp.textContent = "Running remaining stages...";
+      try {
+        const data = await makeApiCall(`/deobfuscate/jobs/${jobId}/run_remaining`, 'POST');
+        statusResp.textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        statusResp.textContent = "Error: " + err;
+      }
+    });
+
+    document.getElementById('runStageBtn').addEventListener('click', async () => {
+      const jobId = document.getElementById('jobId').value;
+      const stNum = Number(document.getElementById('stageNum').value);
+      const runResp = document.getElementById('runStageResponse');
+      runResp.textContent = `Running stage ${stNum}...`;
+      try {
+        const data = await makeApiCall(`/deobfuscate/jobs/${jobId}/run_stage/${stNum}`, 'POST');
+        runResp.textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        runResp.textContent = "Error: " + err;
+      }
+    });
+
+    document.getElementById('viewCodeBtn').addEventListener('click', async () => {
+      const jobId = document.getElementById('jobId').value;
+      const stageNum = Number(document.getElementById('viewStageCode').value);
+      const codeResp = document.getElementById('codeResponse');
+      codeResp.textContent = "Fetching code...";
+      try {
+        const data = await makeApiCall(`/deobfuscate/jobs/${jobId}/code/${stageNum}`);
+        codeResp.textContent = data.code || "(No code returned)";
+      } catch (err) {
+        codeResp.textContent = "Error: " + err;
+      }
+    });
+
+    document.getElementById('viewDiffBtn').addEventListener('click', async () => {
+      const jobId = document.getElementById('jobId').value;
+      const diffNum = Number(document.getElementById('diffStageNum').value);
+      const diffResp = document.getElementById('diffResponse');
+      diffResp.textContent = "Fetching diff...";
+      try {
+        const data = await makeApiCall(`/deobfuscate/jobs/${jobId}/diff/${diffNum}`);
+        diffResp.textContent = data.diff || "(No diff)";
+      } catch (err) {
+        diffResp.textContent = "Error: " + err;
+      }
+    });
+  </script>
+</body>
+</html>
